@@ -1042,177 +1042,118 @@ class BodyPartSelectionPage extends StatefulWidget {
   @override State<BodyPartSelectionPage> createState() => _BodyPartSelectionPageState();
 }
 
+// =======================================================
+// === 第三頁：部位選擇與上傳 (修復定位與點擊邏輯版) ===
+// =======================================================
 class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
   bool isBackView = true;
   final Map<String, WoundPhotoRecord> _capturedWounds = {};
   late Stream<QuerySnapshot> _woundsStream;
 
-  @override void initState() {
+  @override 
+  void initState() {
     super.initState();
     _woundsStream = FirebaseFirestore.instance.collection('observations').where('subject.reference', isEqualTo: 'Patient/${widget.patient.id}').snapshots();
   }
 
   Future<void> _uploadAllToHospitalSystem() async {
-    if (_capturedWounds.isEmpty) { 
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('⚠️ 尚未拍攝任何部位影像', style: TextStyle(fontSize: 15)), backgroundColor: Colors.orange)); 
-      return; 
+    if (_capturedWounds.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('⚠️ 尚未拍攝任何部位影像', style: TextStyle(fontSize: 15)), backgroundColor: Colors.orange));
+      return;
     }
     showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
     try {
       final firestore = FirebaseFirestore.instance;
       for (var entry in _capturedWounds.entries) {
-        String partName = entry.key; 
+        String partName = entry.key;
         WoundPhotoRecord record = entry.value;
-        String rgbBase64 = base64Encode(record.rgbBytes); 
+        String rgbBase64 = base64Encode(record.rgbBytes);
         String thermalBase64 = base64Encode(record.thermalBytes);
-        
+       
         final fhirObservation = FhirWoundObservation(
-          subject: widget.patient, 
-          bodySite: partName, 
-          bradenScore: widget.patient.bradenScore, 
-          features: record.features, 
-          rgbBase64: rgbBase64, 
-          thermalBase64: thermalBase64, 
+          subject: widget.patient,
+          bodySite: partName,
+          bradenScore: widget.patient.bradenScore,
+          features: record.features,
+          rgbBase64: rgbBase64,
+          thermalBase64: thermalBase64,
           woundTemp: record.woundTemp,
           referenceTemp: record.referenceTemp,
         );
-        Map<String, dynamic> finalJson = fhirObservation.toFhirJson(); 
-        finalJson['timestamp'] = FieldValue.serverTimestamp(); 
+        Map<String, dynamic> finalJson = fhirObservation.toFhirJson();
+        finalJson['timestamp'] = FieldValue.serverTimestamp();
         await firestore.collection('observations').add(finalJson).timeout(const Duration(seconds: 10));
       }
       if (!mounted) return;
-      Navigator.pop(context); Navigator.pop(context); 
+      Navigator.pop(context); Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('🎉 FHIR 病歷上傳成功！', style: TextStyle(fontSize: 15)), backgroundColor: Colors.green));
     } catch (e) {
       if (!mounted) return; Navigator.pop(context); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('上傳失敗: $e'), backgroundColor: Colors.redAccent));
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    bool isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+  Widget _viewButton(String label, IconData icon, bool viewState) => ElevatedButton.icon(
+    onPressed: () => setState(() => isBackView = viewState), 
+    icon: Icon(icon, size: 18), 
+    label: Text(label, style: const TextStyle(fontSize: 14)), 
+    style: ElevatedButton.styleFrom(
+      backgroundColor: isBackView == viewState ? Colors.blueAccent : const Color(0xFF2C2C2C), 
+      foregroundColor: Colors.white, 
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8)
+    )
+  );
 
-    return Scaffold(
-      appBar: AppBar(title: Text('${widget.patient.name} - 部位選擇', style: const TextStyle(fontSize: 18))),
-      body: SafeArea(
-        child: StreamBuilder<QuerySnapshot>(
-          stream: _woundsStream,
-          builder: (context, snapshot) {
-            Set<String> existingWounds = {};
-            if (snapshot.hasData) { for (var doc in snapshot.data!.docs) { var data = doc.data() as Map<String, dynamic>; if (data['bodySite'] != null && data['bodySite']['text'] != null) existingWounds.add(data['bodySite']['text']); } }
-            
-            return SingleChildScrollView(
-              physics: const AlwaysScrollableScrollPhysics(), 
-              child: Column(
-                children: [
-                  const SizedBox(height: 12), 
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center, 
-                    children: [
-                      _viewButton('背面觀', Icons.person_search, true), 
-                      const SizedBox(width: 16), 
-                      _viewButton('正面觀', Icons.person, false)
-                    ]
-                  ),
-                  const Padding(padding: EdgeInsets.symmetric(vertical: 12), child: Text('點選圖上位置進行拍攝：', style: TextStyle(color: Colors.grey, fontSize: 14))),
-                  
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      double maxWidth = constraints.maxWidth;
-                      double containerWidth = isLandscape ? 180 : (maxWidth > 380 ? 380 : maxWidth * 0.92);
-                      double containerHeight = containerWidth * (600 / 350); 
-                      
-                      return Center(
-                        child: Container(
-                          width: containerWidth, height: containerHeight, decoration: BoxDecoration(color: const Color(0xFF1E1E1E), border: Border.all(color: Colors.grey.shade800), borderRadius: BorderRadius.circular(16)),
-                          child: Stack(
-                            alignment: Alignment.center,
-                            children: [
-                              ClipRRect(borderRadius: BorderRadius.circular(16), child: Image.asset(isBackView ? 'assets/images/body_back.png.jpg' : 'assets/images/body_front.png.jpg', width: containerWidth, height: containerHeight, fit: BoxFit.fill, errorBuilder: (c,e,s) => const Center(child: Text("找不到圖片")))),
-                              if (isBackView) ..._buildBackDots(context, existingWounds, containerWidth, containerHeight), 
-                              if (!isBackView) ..._buildFrontDots(context, existingWounds, containerWidth, containerHeight),
-                            ],
-                          ),
-                        ),
-                      );
-                    }
-                  ),
-                  const SizedBox(height: 100), 
-                ],
-              ),
-            );
-          }
-        ),
+ // // 🌟 1. 建立背部紅點 (依據截圖精準覆蓋原圖紅點版)
+  List<Widget> _buildBackDots(BuildContext context, Set<String> existing) => [
+    _point(context, 0.73, 0.12, '後腦勺 (Back of Head)', existing),
+    
+    // 肩胛骨 (向外推，蓋住原圖紅點)
+    _point(context, 0.58, 0.23, '左側肩胛骨 (L Shoulder Blade)', existing), 
+    _point(context, 0.88, 0.23, '右側肩胛骨 (R Shoulder Blade)', existing),
+    
+    // 手肘 (往上提，且右邊極度靠右，無視邊界)
+    _point(context, 0.46, 0.38, '左側肘部 (L Elbow)', existing),
+    _point(context, 0.98, 0.38, '右側肘部 (R Elbow)', existing),
+    
+    // 脊椎與薦骨 (上下拉開，拒絕重疊)
+    _point(context, 0.73, 0.40, '脊椎 (Spine)', existing),
+    _point(context, 0.73, 0.50, '薦骨/尾椎 (Sacrum)', existing),
+    
+    // 坐骨脊 (大幅往上提，對齊臀部下緣紅點)
+    _point(context, 0.65, 0.55, '左側坐骨脊 (L Ischial Tuberosity)', existing),
+    _point(context, 0.81, 0.55, '右側坐骨脊 (R Ischial Tuberosity)', existing),
+    
+    // 足跟 (往下拉，對齊最底下的紅點，避開腳踝)
+    _point(context, 0.68, 0.89, '左側足跟 (L Heel)', existing),
+    _point(context, 0.78, 0.89, '右側足跟 (R Heel)', existing),
+  ];
+
+  // 🌟 2. 建立正面紅點 (對應 body_front.png.jpg，維持原來的 11 個部位)
+  List<Widget> _buildFrontDots(BuildContext context, Set<String> existing) => [
+    _point(context, 0.30, 0.16, '右側耳部 (R Ear)', existing), 
+    _point(context, 0.47, 0.16, '左側耳部 (L Ear)', existing),
+    _point(context, 0.19, 0.25, '右側肩部 (R Shoulder)', existing),
+    _point(context, 0.57, 0.25, '左側肩部 (L Shoulder)', existing),
+    _point(context, 0.38, 0.34, '胸廓中央 (Chest)', existing), // 置於胸部中央
+    _point(context, 0.26, 0.44, '右側髖部 (R Hip)', existing),
+    _point(context, 0.50, 0.44, '左側髖部 (L Hip)', existing),
+    _point(context, 0.32, 0.66, '右側膝蓋 (R Knee)', existing),
+    _point(context, 0.45, 0.66, '左側膝蓋 (L Knee)', existing),
+    _point(context, 0.33, 0.87, '右側足趾 (R Toes)', existing),
+    _point(context, 0.45, 0.87, '左側足趾 (L Toes)', existing),
+  ];
+  // 🌟 3. 修復後的 _point 函數與完整的點擊邏輯
+  Widget _point(BuildContext context, double xPercent, double yPercent, String name, Set<String> existing) {
+    bool isTaken = _capturedWounds.containsKey(name) || existing.contains(name);
+   
+    // 將 0.0 ~ 1.0 的百分比轉換為 Align 需要的 -1.0 ~ 1.0
+    return Align(
+      alignment: Alignment(
+        (xPercent * 2) - 1,
+        (yPercent * 2) - 1
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _uploadAllToHospitalSystem, 
-        icon: const Icon(Icons.cloud_upload, size: 20), 
-        label: const Text('上傳 FHIR 病歷', style: TextStyle(fontSize: 15)), 
-        backgroundColor: Colors.green, 
-        foregroundColor: Colors.white
-      ),
-    );
-  }
-
-// 建立背部紅點 (x, y 為 0.0 ~ 1.0 的相對位置)
-List<Widget> _buildBackDots(BuildContext context, Set<String> existing) => [
-  _point(context, 0.49, 0.12, '後腦勺 (Back of Head)', existing),
-  _point(context, 0.35, 0.25, '左側肩胛骨 (L Shoulder Blade)', existing), // 圖片左側是右肩胛骨，右側是左肩胛骨，請依醫學視角確認
-  _point(context, 0.65, 0.25, '右側肩胛骨 (R Shoulder Blade)', existing),
-  _point(context, 0.25, 0.42, '左側肘部 (L Elbow)', existing),
-  _point(context, 0.75, 0.42, '右側肘部 (R Elbow)', existing),
-  _point(context, 0.50, 0.45, '脊椎 (Spine)', existing),
-  _point(context, 0.50, 0.52, '薦骨/尾椎 (Sacrum)', existing),
-  _point(context, 0.44, 0.88, '左側足跟 (L Heel)', existing),
-  _point(context, 0.56, 0.88, '右側足跟 (R Heel)', existing),
-];
-
-// 建立正面紅點 (x, y 為 0.0 ~ 1.0 的相對位置)
-List<Widget> _buildFrontDots(BuildContext context, Set<String> existing) => [
-  _point(context, 0.32, 0.16, '右側耳部 (R Ear)', existing),
-  _point(context, 0.68, 0.16, '左側耳部 (L Ear)', existing),
-  _point(context, 0.20, 0.25, '右側肩部 (R Shoulder)', existing),
-  _point(context, 0.80, 0.25, '左側肩部 (L Shoulder)', existing),
-  _point(context, 0.50, 0.34, '胸廓中央 (Chest)', existing),
-  _point(context, 0.35, 0.43, '右側髖部 (R Hip)', existing),
-  _point(context, 0.65, 0.43, '左側髖部 (L Hip)', existing),
-  _point(context, 0.35, 0.65, '右側膝蓋 (R Knee)', existing),
-  _point(context, 0.65, 0.65, '左側膝蓋 (L Knee)', existing),
-  _point(context, 0.38, 0.86, '右側足趾 (R Toes)', existing),
-  _point(context, 0.62, 0.86, '左側足趾 (L Toes)', existing),
-];
-
-// 修改後的 _point 函數
-Widget _point(BuildContext context, double xPercent, double yPercent, String name, Set<String> existing) {
-  bool isTaken = _capturedWounds.containsKey(name) || existing.contains(name);
-  
-  // 使用 Align 來做相對定位，Alignment 的範圍是 -1.0 到 1.0，
-  // 所以我們將 0.0~1.0 的百分比轉換為 -1.0~1.0
-  return Align(
-    alignment: Alignment(
-      (xPercent * 2) - 1, 
-      (yPercent * 2) - 1
-    ),
-    child: GestureDetector(
-      onTap: () {
-        // 點擊事件處理
-        print('Tapped on $name');
-      },
-      child: Container(
-        width: 20, // 紅點大小
-        height: 20,
-        decoration: BoxDecoration(
-          color: isTaken ? Colors.grey : Colors.redAccent.withOpacity(0.8),
-          shape: BoxShape.circle,
-          border: Border.all(color: Colors.white, width: 2),
-          boxShadow: [
-            BoxShadow(color: Colors.black45, blurRadius: 4),
-          ],
-        ),
-      ),
-    );
-  }
-}
+      child: GestureDetector(
+        onTap: () async {
           if (isTaken) {
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('⚠️ 已有紀錄，請至歷史紀錄刪除重拍。', style: TextStyle(fontSize: 14))));
           } else {
@@ -1223,7 +1164,103 @@ Widget _point(BuildContext context, double xPercent, double yPercent, String nam
             }
           }
         },
-        child: Container(width: 36, height: 36, decoration: BoxDecoration(color: isTaken ? Colors.greenAccent.withValues(alpha: 0.9) : Colors.redAccent.withValues(alpha: 0.85), shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 2)), child: Icon(isTaken ? Icons.check : Icons.add, size: 20, color: Colors.white)),
+        child: Container(
+          width: 36, // 恢復你原本的按鈕大小
+          height: 36,
+          decoration: BoxDecoration(
+            color: isTaken ? Colors.greenAccent.withValues(alpha: 0.9) : Colors.redAccent.withValues(alpha: 0.85), 
+            shape: BoxShape.circle, 
+            border: Border.all(color: Colors.white, width: 2),
+            boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 4)]
+          ), 
+          child: Icon(isTaken ? Icons.check : Icons.add, size: 20, color: Colors.white)
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    bool isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    return Scaffold(
+      appBar: AppBar(title: Text('${widget.patient.name} - 部位選擇', style: const TextStyle(fontSize: 18))),
+      body: SafeArea(
+        child: StreamBuilder<QuerySnapshot>(
+          stream: _woundsStream,
+          builder: (context, snapshot) {
+            Set<String> existingWounds = {};
+            if (snapshot.hasData) { 
+              for (var doc in snapshot.data!.docs) { 
+                var data = doc.data() as Map<String, dynamic>; 
+                if (data['bodySite'] != null && data['bodySite']['text'] != null) {
+                  existingWounds.add(data['bodySite']['text']); 
+                }
+              } 
+            }
+           
+            return SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              child: Column(
+                children: [
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _viewButton('背面觀', Icons.person_search, true),
+                      const SizedBox(width: 16),
+                      _viewButton('正面觀', Icons.person, false)
+                    ]
+                  ),
+                  const Padding(padding: EdgeInsets.symmetric(vertical: 12), child: Text('點選圖上位置進行拍攝：', style: TextStyle(color: Colors.grey, fontSize: 14))),
+                 
+                  LayoutBuilder(
+  builder: (context, constraints) {
+    double maxWidth = constraints.maxWidth;
+    double containerWidth;
+
+    // 🌟 新增判斷：如果是大螢幕（電腦版、網頁版、平板）
+    if (maxWidth > 600) {
+      // 電腦版設定：根據視窗的「高度」來動態放大，讓他佔據螢幕約 65% 的高度
+      double screenHeight = MediaQuery.of(context).size.height;
+      double targetHeight = screenHeight * 0.65; 
+      containerWidth = targetHeight * (350 / 600); 
+    } else {
+      // 📱 手機版設定：維持你原本的邏輯，完全不改動！
+      containerWidth = isLandscape ? 180 : (maxWidth > 380 ? 380 : maxWidth * 0.92);
+    }
+
+    double containerHeight = containerWidth * (600 / 350);
+   
+    return Center(
+      child: Container(
+        width: containerWidth, height: containerHeight, decoration: BoxDecoration(color: const Color(0xFF1E1E1E), border: Border.all(color: Colors.grey.shade800), borderRadius: BorderRadius.circular(16)),
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            ClipRRect(borderRadius: BorderRadius.circular(16), child: Image.asset(isBackView ? 'assets/images/body_back.png.jpg' : 'assets/images/body_front.png.jpg', width: containerWidth, height: containerHeight, fit: BoxFit.fill, errorBuilder: (c,e,s) => const Center(child: Text("找不到圖片")))),
+            
+            // 呼叫紅點
+            if (isBackView) ..._buildBackDots(context, existingWounds),
+            if (!isBackView) ..._buildFrontDots(context, existingWounds),
+          ],
+        ),
+      ),
+    );
+  }
+),
+                  const SizedBox(height: 100),
+                ],
+              ),
+            );
+          }
+        ),
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _uploadAllToHospitalSystem,
+        icon: const Icon(Icons.cloud_upload, size: 20),
+        label: const Text('上傳 FHIR 病歷', style: TextStyle(fontSize: 15)),
+        backgroundColor: Colors.green,
+        foregroundColor: Colors.white
       ),
     );
   }
