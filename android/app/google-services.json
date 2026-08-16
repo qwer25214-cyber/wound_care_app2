@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "583795890900",
+    "project_id": "wound-care-app2",
+    "storage_bucket": "wound-care-app2.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:583795890900:android:d9a64a4b71dc0130233941",
+        "android_client_info": {
+          "package_name": "com.example.wound_care_app2"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDOHVJwxli1vUzBVAVA14pCUVphzpuesBw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
