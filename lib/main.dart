@@ -1154,20 +1154,65 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
     );
   }
 
-  Widget _viewButton(String label, IconData icon, bool viewState) => ElevatedButton.icon(onPressed: () => setState(() => isBackView = viewState), icon: Icon(icon, size: 18), label: Text(label, style: const TextStyle(fontSize: 14)), style: ElevatedButton.styleFrom(backgroundColor: isBackView == viewState ? Colors.blueAccent : const Color(0xFF2C2C2C), foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8)));
+// 建立背部紅點 (x, y 為 0.0 ~ 1.0 的相對位置)
+List<Widget> _buildBackDots(BuildContext context, Set<String> existing) => [
+  _point(context, 0.49, 0.12, '後腦勺 (Back of Head)', existing),
+  _point(context, 0.35, 0.25, '左側肩胛骨 (L Shoulder Blade)', existing), // 圖片左側是右肩胛骨，右側是左肩胛骨，請依醫學視角確認
+  _point(context, 0.65, 0.25, '右側肩胛骨 (R Shoulder Blade)', existing),
+  _point(context, 0.25, 0.42, '左側肘部 (L Elbow)', existing),
+  _point(context, 0.75, 0.42, '右側肘部 (R Elbow)', existing),
+  _point(context, 0.50, 0.45, '脊椎 (Spine)', existing),
+  _point(context, 0.50, 0.52, '薦骨/尾椎 (Sacrum)', existing),
+  _point(context, 0.44, 0.88, '左側足跟 (L Heel)', existing),
+  _point(context, 0.56, 0.88, '右側足跟 (R Heel)', existing),
+];
+
+// 建立正面紅點 (x, y 為 0.0 ~ 1.0 的相對位置)
+List<Widget> _buildFrontDots(BuildContext context, Set<String> existing) => [
+  _point(context, 0.32, 0.16, '右側耳部 (R Ear)', existing),
+  _point(context, 0.68, 0.16, '左側耳部 (L Ear)', existing),
+  _point(context, 0.20, 0.25, '右側肩部 (R Shoulder)', existing),
+  _point(context, 0.80, 0.25, '左側肩部 (L Shoulder)', existing),
+  _point(context, 0.50, 0.34, '胸廓中央 (Chest)', existing),
+  _point(context, 0.35, 0.43, '右側髖部 (R Hip)', existing),
+  _point(context, 0.65, 0.43, '左側髖部 (L Hip)', existing),
+  _point(context, 0.35, 0.65, '右側膝蓋 (R Knee)', existing),
+  _point(context, 0.65, 0.65, '左側膝蓋 (L Knee)', existing),
+  _point(context, 0.38, 0.86, '右側足趾 (R Toes)', existing),
+  _point(context, 0.62, 0.86, '左側足趾 (L Toes)', existing),
+];
+
+// 修改後的 _point 函數
+Widget _point(BuildContext context, double xPercent, double yPercent, String name, Set<String> existing) {
+  bool isTaken = _capturedWounds.containsKey(name) || existing.contains(name);
   
-  List<Widget> _buildBackDots(BuildContext context, Set<String> existing, double w, double h) => [_point(context, 75, 165, '後腦勺 (Back of Head)', existing, w, h), _point(context, 150, 140, '左側肩胛骨 (L Shoulder Blade)', existing, w, h), _point(context, 150, 190, '右側肩胛骨 (R Shoulder Blade)', existing, w, h), _point(context, 230, 100, '左側肘部 (L Elbow)', existing, w, h), _point(context, 230, 230, '右側肘部 (R Elbow)', existing, w, h), _point(context, 230, 165, '脊椎 (Spine)', existing, w, h), _point(context, 280, 165, '薦骨/尾椎 (Sacrum)', existing, w, h), _point(context, 500, 140, '左側足跟 (L Heel)', existing, w, h), _point(context, 500, 190, '右側足跟 (R Heel)', existing, w, h)];
-  List<Widget> _buildFrontDots(BuildContext context, Set<String> existing, double w, double h) => [_point(context, 90, 125, '右側耳部 (R Ear)', existing, w, h), _point(context, 90, 205, '左側耳部 (L Ear)', existing, w, h), _point(context, 130, 95, '右側肩部 (R Shoulder)', existing, w, h), _point(context, 130, 235, '左側肩部 (L Shoulder)', existing, w, h), _point(context, 200, 165, '胸廓中央 (Chest)', existing, w, h), _point(context, 250, 110, '右側髖部 (R Hip)', existing, w, h), _point(context, 250, 220, '左側髖部 (L Hip)', existing, w, h), _point(context, 380, 125, '右側膝蓋 (R Knee)', existing, w, h), _point(context, 380, 205, '左側膝蓋 (L Knee)', existing, w, h), _point(context, 500, 140, '右側足趾 (R Toes)', existing, w, h), _point(context, 500, 190, '左側足趾 (L Toes)', existing, w, h)];
-
-  Widget _point(BuildContext context, double originalTop, double originalLeft, String name, Set<String> existing, double w, double h) {
-    bool isTaken = _capturedWounds.containsKey(name) || existing.contains(name);
-    double topPos = (originalTop / 600) * h;
-    double leftPos = (originalLeft / 350) * w;
-
-    return Positioned(
-      top: topPos, left: leftPos,
-      child: GestureDetector(
-        onTap: () async {
+  // 使用 Align 來做相對定位，Alignment 的範圍是 -1.0 到 1.0，
+  // 所以我們將 0.0~1.0 的百分比轉換為 -1.0~1.0
+  return Align(
+    alignment: Alignment(
+      (xPercent * 2) - 1, 
+      (yPercent * 2) - 1
+    ),
+    child: GestureDetector(
+      onTap: () {
+        // 點擊事件處理
+        print('Tapped on $name');
+      },
+      child: Container(
+        width: 20, // 紅點大小
+        height: 20,
+        decoration: BoxDecoration(
+          color: isTaken ? Colors.grey : Colors.redAccent.withOpacity(0.8),
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 2),
+          boxShadow: [
+            BoxShadow(color: Colors.black45, blurRadius: 4),
+          ],
+        ),
+      ),
+    );
+  }
+}
           if (isTaken) {
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('⚠️ 已有紀錄，請至歷史紀錄刪除重拍。', style: TextStyle(fontSize: 14))));
           } else {
