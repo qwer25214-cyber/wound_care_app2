@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; 
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -17,7 +17,6 @@ Future<void> main() async {
 
 class WoundCareApp extends StatelessWidget {
   const WoundCareApp({super.key});
-
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -49,7 +48,6 @@ class WoundCareApp extends StatelessWidget {
 abstract class ThermalCameraService {
   Future<Map<String, dynamic>?> captureThermalData();
 }
-
 class MockThermalCamera implements ThermalCameraService {
   final ImagePicker _picker = ImagePicker();
   @override
@@ -64,7 +62,6 @@ class MockThermalCamera implements ThermalCameraService {
     };
   }
 }
-
 class NativeFlirCamera implements ThermalCameraService {
   static const platform = MethodChannel('com.woundcare.app/thermal_channel');
   @override
@@ -84,105 +81,151 @@ class NativeFlirCamera implements ThermalCameraService {
 }
 
 // =======================================================
-// === 2. 核心資料模型 (FHIR 格式) ===
+// === 2. 核心資料模型 (符合國際 HL7 FHIR R4 格式) ===
 // =======================================================
 class Patient {
   final String bedNumber; final String name; final String id; final String gender; final int age; final double bradenScore;
   Patient({required this.bedNumber, required this.name, required this.id, required this.gender, required this.age, required this.bradenScore});
   Map<String, dynamic> toJson() => {'bedNumber': bedNumber, 'name': name, 'id': id, 'gender': gender, 'age': age, 'bradenScore': bradenScore};
   factory Patient.fromJson(Map<String, dynamic> json) => Patient(
-    bedNumber: json['bedNumber'] ?? '', 
-    name: json['name'] ?? '', 
-    id: json['id'] ?? '', 
-    gender: json['gender'] ?? '男', 
-    age: (json['age'] is num) ? (json['age'] as num).toInt() : int.tryParse(json['age']?.toString() ?? '0') ?? 0, 
+    bedNumber: json['bedNumber'] ?? '',
+    name: json['name'] ?? '',
+    id: json['id'] ?? '',
+    gender: json['gender'] ?? '男',
+    age: (json['age'] is num) ? (json['age'] as num).toInt() : int.tryParse(json['age']?.toString() ?? '0') ?? 0,
     bradenScore: (json['bradenScore'] is num) ? (json['bradenScore'] as num).toDouble() : double.tryParse(json['bradenScore']?.toString() ?? '23') ?? 23.0
   );
 }
 
 class WoundFeatureData { String exudateAmount = '少量'; String tissueType = '紅色肉芽組織'; }
 
-class WoundPhotoRecord { 
-  final Uint8List rgbBytes; 
-  final Uint8List thermalBytes; 
-  final WoundFeatureData features; 
-  final double woundTemp; 
+class WoundPhotoRecord {
+  final Uint8List rgbBytes;
+  final Uint8List thermalBytes;
+  final WoundFeatureData features;
+  final double woundTemp;
   final double referenceTemp;
   double get deltaT => woundTemp - referenceTemp;
-
   WoundPhotoRecord({
-    required this.rgbBytes, 
-    required this.thermalBytes, 
-    required this.features, 
-    required this.woundTemp,
-    required this.referenceTemp,
-  }); 
-}
-
-class FhirWoundObservation {
-  final Patient subject; 
-  final String bodySite; 
-  final double bradenScore; 
-  final WoundFeatureData features; 
-  final String rgbBase64; 
-  final String thermalBase64; 
-  final double woundTemp; 
-  final double referenceTemp;
-
-  FhirWoundObservation({
-    required this.subject, 
-    required this.bodySite, 
-    required this.bradenScore, 
-    required this.features, 
-    required this.rgbBase64, 
-    required this.thermalBase64, 
+    required this.rgbBytes,
+    required this.thermalBytes,
+    required this.features,
     required this.woundTemp,
     required this.referenceTemp,
   });
-  
+}
+
+// 🌟 升級版：符合 HL7 FHIR R4 + LOINC 國際醫學代碼的資料模型
+class FhirWoundObservation {
+  final Patient subject;
+  final String bodySite;
+  final double bradenScore;
+  final WoundFeatureData features;
+  final String rgbBase64;
+  final String thermalBase64;
+  final double woundTemp;
+  final double referenceTemp;
+
+  FhirWoundObservation({
+    required this.subject,
+    required this.bodySite,
+    required this.bradenScore,
+    required this.features,
+    required this.rgbBase64,
+    required this.thermalBase64,
+    required this.woundTemp,
+    required this.referenceTemp,
+  });
+
   Map<String, dynamic> toFhirJson() {
     double deltaT = woundTemp - referenceTemp;
-    List<Map<String, dynamic>> componentList = [
-      {"code": {"text": "Braden Scale Score"}, "valueQuantity": {"value": bradenScore, "system": "http://unitsofmeasure.org", "code": "{score}"}},
-      {"code": {"text": "Exudate Amount (滲液量)"}, "valueString": features.exudateAmount},
-      {"code": {"text": "Tissue Type (傷口組織)"}, "valueString": features.tissueType},
-      {"code": {"text": "RGB Optical Image"}, "valueAttachment": {"contentType": "image/jpeg", "data": rgbBase64}},
-      {"code": {"text": "Thermal Infrared Image"}, "valueAttachment": {"contentType": "image/jpeg", "data": thermalBase64}},
-      {"code": {"text": "Wound Center Temperature"}, "valueQuantity": {"value": woundTemp, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}},
-      {"code": {"text": "Periwound Reference Temperature"}, "valueQuantity": {"value": referenceTemp, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}},
-      {"code": {"text": "Temperature Difference (Delta T)"}, "valueQuantity": {"value": double.parse(deltaT.toStringAsFixed(1)), "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}}
-    ];
+    String nowIso = DateTime.now().toUtc().toIso8601String();
+
     return {
-      "resourceType": "Observation", "status": "final",
-      "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam"}]}],
-      "code": {"coding": [{"system": "http://loinc.org", "code": "89220-8", "display": "Wound characteristics"}]},
-      "subject": {"reference": "Patient/${subject.id}", "display": subject.name},
-      "bodySite": {"text": bodySite},
-      "component": componentList
+      "resourceType": "Observation",
+      "status": "final",
+      "category": [
+        {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+              "code": "exam",
+              "display": "Exam"
+            }
+          ]
+        }
+      ],
+      "code": {
+        "coding": [
+          {"system": "http://loinc.org", "code": "39126-8", "display": "Wound assessment panel"} 
+        ],
+        "text": "熱影像傷口評估報告"
+      },
+      "subject": {
+        "reference": "Patient/${subject.id}",
+        "display": subject.name
+      },
+      "effectiveDateTime": nowIso,
+      "bodySite": {
+        "text": bodySite 
+      },
+      "component": [
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "38228-3", "display": "Braden scale total score"}]},
+          "valueQuantity": {"value": bradenScore, "system": "http://unitsofmeasure.org", "code": "{score}"}
+        },
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "72290-0", "display": "Exudate amount"}]},
+          "valueCodeableConcept": {"text": features.exudateAmount} 
+        },
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "72289-2", "display": "Tissue type in wound bed"}]},
+          "valueCodeableConcept": {"text": features.tissueType}
+        },
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "72728-9", "display": "Wound image"}]},
+          "valueAttachment": {"contentType": "image/jpeg", "data": rgbBase64, "title": "RGB Optical Image"}
+        },
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "72728-9", "display": "Thermal Image"}]},
+          "valueAttachment": {"contentType": "image/jpeg", "data": thermalBase64, "title": "Thermal Infrared Image"}
+        },
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "8310-5", "display": "Body temperature"}]},
+          "valueQuantity": {"value": woundTemp, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
+        },
+        {
+          "code": {"text": "Periwound Reference Temperature"},
+          "valueQuantity": {"value": referenceTemp, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
+        },
+        {
+          "code": {"text": "Temperature Difference (Delta T)"},
+          "valueQuantity": {"value": double.parse(deltaT.toStringAsFixed(1)), "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
+        }
+      ]
     };
   }
 }
 
 // =======================================================
-// === 第一頁：病患清單 (🌟 響應式手機排版修復版) ===
+// === 第一頁：病患清單 ===
 // =======================================================
 class PatientListPage extends StatefulWidget { const PatientListPage({super.key}); @override State<PatientListPage> createState() => _PatientListPageState(); }
 class _PatientListPageState extends State<PatientListPage> {
   late Stream<QuerySnapshot> _patientsStream;
   String _searchQuery = '';
   @override void initState() { super.initState(); _patientsStream = FirebaseFirestore.instance.collection('patients').snapshots(); }
-
   void _showAddPatientDialog() {
     final bedController = TextEditingController(); final nameController = TextEditingController(); final idController = TextEditingController(); final ageController = TextEditingController(); final scoreController = TextEditingController(); String selectedGender = '男';
     showDialog(context: context, builder: (context) => StatefulBuilder(builder: (context, setDialogState) => AlertDialog(
       title: const Row(children: [Icon(Icons.person_add, color: Colors.blueAccent, size: 24), SizedBox(width: 8), Text('登錄新病患', style: TextStyle(fontSize: 18))]),
       content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
-        TextField(controller: bedController, decoration: const InputDecoration(labelText: '床號 (如 301-A)')), 
-        TextField(controller: nameController, decoration: const InputDecoration(labelText: '病患姓名')), 
+        TextField(controller: bedController, decoration: const InputDecoration(labelText: '床號 (如 301-A)')),
+        TextField(controller: nameController, decoration: const InputDecoration(labelText: '病患姓名')),
         TextField(controller: idController, decoration: const InputDecoration(labelText: '病歷號')),
         Row(children: [
-          Expanded(child: TextField(controller: ageController, decoration: const InputDecoration(labelText: '年齡'), keyboardType: TextInputType.number)), 
-          const SizedBox(width: 16), 
+          Expanded(child: TextField(controller: ageController, decoration: const InputDecoration(labelText: '年齡'), keyboardType: TextInputType.number)),
+          const SizedBox(width: 16),
           DropdownButton<String>(value: selectedGender, items: ['男', '女'].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(), onChanged: (val) => setDialogState(() => selectedGender = val!))
         ]),
         TextField(controller: scoreController, decoration: const InputDecoration(labelText: 'Braden 評分 (6-23)'), keyboardType: TextInputType.number),
@@ -198,35 +241,34 @@ class _PatientListPageState extends State<PatientListPage> {
       ],
     )));
   }
-  
+ 
   void _confirmDeletePatient(String docId, String patientName) {
     showDialog(context: context, builder: (context) => AlertDialog(
-      title: const Text('⚠️ 刪除病患', style: TextStyle(fontSize: 18)), 
+      title: const Text('⚠️ 刪除病患', style: TextStyle(fontSize: 18)),
       content: Text('確定刪除「$patientName」？', style: const TextStyle(fontSize: 15)),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')), 
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () async { Navigator.pop(context); await FirebaseFirestore.instance.collection('patients').doc(docId).delete(); }, child: const Text('刪除', style: TextStyle(color: Colors.white)))
       ],
     ));
   }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('傷口預警管理系統', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20)), 
+        title: const Text('傷口預警管理系統', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20)),
         bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(60.0), 
+          preferredSize: const Size.fromHeight(60.0),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12), 
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
             child: TextField(
-              onChanged: (value) => setState(() => _searchQuery = value.trim()), 
-              style: const TextStyle(color: Colors.white, fontSize: 15), 
+              onChanged: (value) => setState(() => _searchQuery = value.trim()),
+              style: const TextStyle(color: Colors.white, fontSize: 15),
               decoration: InputDecoration(
-                hintText: '🔍 搜尋姓名、床號或病歷號...', 
-                filled: true, 
-                fillColor: const Color(0xFF2C2C2C), 
-                contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 16), 
+                hintText: '🔍 搜尋姓名、床號或病歷號...',
+                filled: true,
+                fillColor: const Color(0xFF2C2C2C),
+                contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 16),
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none)
               )
             )
@@ -246,82 +288,76 @@ class _PatientListPageState extends State<PatientListPage> {
                 var patientList = snapshot.data!.docs.map((doc) => {'docId': doc.id, 'patient': Patient.fromJson(doc.data() as Map<String, dynamic>)}).toList();
                 patientList.sort((a, b) => (a['patient'] as Patient).bradenScore.compareTo((b['patient'] as Patient).bradenScore));
                 if (_searchQuery.isNotEmpty) {
-                  patientList = patientList.where((item) { 
-                    final p = item['patient'] as Patient; 
-                    return p.name.contains(_searchQuery) || p.bedNumber.contains(_searchQuery) || p.id.contains(_searchQuery); 
+                  patientList = patientList.where((item) {
+                    final p = item['patient'] as Patient;
+                    return p.name.contains(_searchQuery) || p.bedNumber.contains(_searchQuery) || p.id.contains(_searchQuery);
                   }).toList();
                 }
-                
+               
                 return ListView.builder(
-                  physics: const AlwaysScrollableScrollPhysics(), 
-                  padding: const EdgeInsets.only(left: 12, right: 12, top: 8, bottom: 100), 
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.only(left: 12, right: 12, top: 8, bottom: 100),
                   itemCount: patientList.length,
                   itemBuilder: (context, index) {
-                    final docId = patientList[index]['docId'] as String; 
+                    final docId = patientList[index]['docId'] as String;
                     final p = patientList[index]['patient'] as Patient;
                     Color riskColor = p.bradenScore <= 12 ? Colors.redAccent : (p.bradenScore <= 14 ? Colors.orangeAccent : Colors.greenAccent);
-                    
-                    // 🌟 重新設計的手機端無溢出病患卡片
+                   
                     return Card(
                       elevation: 3, margin: const EdgeInsets.only(bottom: 10),
                       shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14), 
+                        borderRadius: BorderRadius.circular(14),
                         side: BorderSide(color: p.bradenScore <= 12 ? Colors.redAccent.withValues(alpha: 0.6) : Colors.transparent, width: 1.5)
                       ),
                       child: InkWell(
                         onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => PatientHistoryPage(patient: p))),
                         borderRadius: BorderRadius.circular(14),
                         child: Padding(
-                          padding: const EdgeInsets.all(12), 
+                          padding: const EdgeInsets.all(12),
                           child: Row(
                             children: [
-                              // 床號小方塊 (自適應縮放)
                               Container(
-                                width: 54, height: 54, 
-                                decoration: BoxDecoration(color: Colors.blueGrey.withValues(alpha: 0.25), borderRadius: BorderRadius.circular(10)), 
+                                width: 54, height: 54,
+                                decoration: BoxDecoration(color: Colors.blueGrey.withValues(alpha: 0.25), borderRadius: BorderRadius.circular(10)),
                                 child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center, 
+                                  mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
-                                    const Icon(Icons.hotel, color: Colors.blueAccent, size: 20), 
-                                    const SizedBox(height: 2), 
+                                    const Icon(Icons.hotel, color: Colors.blueAccent, size: 20),
+                                    const SizedBox(height: 2),
                                     FittedBox(fit: BoxFit.scaleDown, child: Padding(padding: const EdgeInsets.symmetric(horizontal: 2), child: Text(p.bedNumber, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.blueAccent))))
                                   ]
                                 )
                               ),
                               const SizedBox(width: 12),
-                              
-                              // 病患詳細資料
                               Expanded(
                                 child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start, 
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Row(
                                       children: [
                                         Flexible(
                                           child: Text(
-                                            p.name.isEmpty ? '未填姓名' : p.name, 
-                                            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold), 
+                                            p.name.isEmpty ? '未填姓名' : p.name,
+                                            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
                                             overflow: TextOverflow.ellipsis
                                           )
-                                        ), 
-                                        const SizedBox(width: 6), 
+                                        ),
+                                        const SizedBox(width: 6),
                                         Text('${p.gender} / ${p.age}歲', style: const TextStyle(color: Colors.grey, fontSize: 13))
                                       ]
-                                    ), 
-                                    const SizedBox(height: 4), 
+                                    ),
+                                    const SizedBox(height: 4),
                                     Text('病歷號: ${p.id}', style: const TextStyle(color: Colors.white70, fontSize: 13), overflow: TextOverflow.ellipsis)
                                   ]
                                 )
                               ),
-                              
                               const SizedBox(width: 8),
-                              // 右側 Braden 分數與刪除鍵
                               Column(
                                 crossAxisAlignment: CrossAxisAlignment.end,
                                 children: [
                                   Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), 
-                                    decoration: BoxDecoration(color: riskColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(12), border: Border.all(color: riskColor.withValues(alpha: 0.6))), 
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(color: riskColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(12), border: Border.all(color: riskColor.withValues(alpha: 0.6))),
                                     child: Text('Braden: ${p.bradenScore.toInt()}分', style: TextStyle(color: riskColor, fontWeight: FontWeight.bold, fontSize: 12))
                                   ),
                                 ]
@@ -329,7 +365,7 @@ class _PatientListPageState extends State<PatientListPage> {
                               IconButton(
                                 padding: const EdgeInsets.only(left: 8),
                                 constraints: const BoxConstraints(),
-                                icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 22), 
+                                icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 22),
                                 onPressed: () => _confirmDeletePatient(docId, p.name)
                               ),
                             ]
@@ -345,10 +381,10 @@ class _PatientListPageState extends State<PatientListPage> {
         ),
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showAddPatientDialog, 
-        icon: const Icon(Icons.person_add, size: 20), 
-        label: const Text('新增病患', style: TextStyle(fontSize: 15)), 
-        backgroundColor: Colors.blueAccent, 
+        onPressed: _showAddPatientDialog,
+        icon: const Icon(Icons.person_add, size: 20),
+        label: const Text('新增病患', style: TextStyle(fontSize: 15)),
+        backgroundColor: Colors.blueAccent,
         foregroundColor: Colors.white
       ),
     );
@@ -356,27 +392,23 @@ class _PatientListPageState extends State<PatientListPage> {
 }
 
 // =======================================================
-// === 🌟 歷史疊加紀錄卡 (自適應小螢幕換行與 Timestamp 防禦版) ===
+// === 歷史疊加紀錄卡 ===
 // =======================================================
 class DualModalOverlayCard extends StatefulWidget {
   final String docId; final Map<String, dynamic> data; final VoidCallback onDelete;
   const DualModalOverlayCard({super.key, required this.docId, required this.data, required this.onDelete});
   @override State<DualModalOverlayCard> createState() => _DualModalOverlayCardState();
 }
-
 class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
   double _thermalOpacity = 0.5;
-
   String? _rgbUrl;
   String? _thermalUrl;
   bool _isParsing = true;
-
   @override
   void initState() {
     super.initState();
     _parseImagesAsync();
   }
-
   @override
   void didUpdateWidget(covariant DualModalOverlayCard oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -384,20 +416,17 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
       _parseImagesAsync();
     }
   }
-
   Future<void> _parseImagesAsync() async {
     setState(() => _isParsing = true);
     await Future.delayed(const Duration(milliseconds: 50));
     if (!mounted) return;
-
     try {
       List<dynamic> comps = widget.data['component'] ?? [];
-      String rgbBase64 = _extractVal(comps, 'RGB Optical Image');
+      String rgbBase64 = _extractVal(comps, 'RGB Optical Image', 'Wound image');
       if (rgbBase64.isEmpty && widget.data['media'] != null) rgbBase64 = widget.data['media']['rgb_url'] ?? '';
-      
-      String thermalBase64 = _extractVal(comps, 'Thermal Infrared Image');
+     
+      String thermalBase64 = _extractVal(comps, 'Thermal Infrared Image', 'Thermal Image');
       if (thermalBase64.isEmpty && widget.data['media'] != null) thermalBase64 = widget.data['media']['thermal_url'] ?? '';
-
       _rgbUrl = _convertToSafeDataUri(rgbBase64);
       _thermalUrl = _convertToSafeDataUri(thermalBase64);
     } catch (e) {
@@ -406,7 +435,6 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
       if (mounted) setState(() => _isParsing = false);
     }
   }
-
   String? _convertToSafeDataUri(String? dataString) {
     if (dataString == null || dataString.trim().isEmpty) return null;
     String cleanString = dataString.replaceAll('\n', '').replaceAll('\r', '').replaceAll(' ', '');
@@ -417,32 +445,36 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
     if (padding != 0) cleanString += '=' * (4 - padding);
     return 'data:image/jpeg;base64,$cleanString';
   }
-
-  // 🌟 安全時間解析器：防止 null 或 String 導致 TypeError 崩潰
-  String _formatDateSafe(dynamic t) { 
-    if (t == null) return '剛剛記錄'; 
+  String _formatDateSafe(dynamic t) {
+    if (t == null) return '剛剛記錄';
     if (t is Timestamp) {
-      DateTime d = t.toDate(); 
-      return '${d.month.toString().padLeft(2,'0')}/${d.day.toString().padLeft(2,'0')} ${d.hour.toString().padLeft(2,'0')}:${d.minute.toString().padLeft(2,'0')}'; 
+      DateTime d = t.toDate();
+      return '${d.month.toString().padLeft(2,'0')}/${d.day.toString().padLeft(2,'0')} ${d.hour.toString().padLeft(2,'0')}:${d.minute.toString().padLeft(2,'0')}';
     }
     return t.toString();
   }
-  
-  String _extractVal(List<dynamic> comps, String txt) { 
+ 
+  String _extractVal(List<dynamic> comps, String txt, [String? loincDisplay]) {
     try {
-      for (var c in comps) { 
-        if (c is Map && c['code'] != null && c['code']['text'] == txt) {
-          if (c['valueString'] != null) return c['valueString'];
-          if (c['valueAttachment'] != null && c['valueAttachment']['data'] != null) return c['valueAttachment']['data'];
-          if (c['valueQuantity'] != null && c['valueQuantity']['value'] != null) return c['valueQuantity']['value'].toString();
+      for (var c in comps) {
+        if (c is Map && c['code'] != null) {
+          bool match = false;
+          if (c['code']['text'] == txt) match = true;
+          if (loincDisplay != null && c['code']['coding'] != null && c['code']['coding'][0]['display'] == loincDisplay) match = true;
+          
+          if (match) {
+            if (c['valueCodeableConcept'] != null) return c['valueCodeableConcept']['text'];
+            if (c['valueString'] != null) return c['valueString'];
+            if (c['valueAttachment'] != null && c['valueAttachment']['data'] != null) return c['valueAttachment']['data'];
+            if (c['valueQuantity'] != null && c['valueQuantity']['value'] != null) return c['valueQuantity']['value'].toString();
+          }
         }
       }
     } catch (e) {
       debugPrint('數值提取錯誤: $e');
     }
-    return ''; 
+    return '';
   }
-
   Widget _buildImageProvider(String? url) {
     if (url != null && url.isNotEmpty) {
       return Image.network(
@@ -453,15 +485,14 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
     }
     return const Center(child: Icon(Icons.broken_image, color: Colors.grey, size: 36));
   }
-
   @override
   Widget build(BuildContext context) {
     List<dynamic> comps = widget.data['component'] ?? [];
-    String exudate = _extractVal(comps, 'Exudate Amount (滲液量)');
-    String tissue = _extractVal(comps, 'Tissue Type (傷口組織)');
-    String woundTempStr = _extractVal(comps, 'Wound Center Temperature');
+    String exudate = _extractVal(comps, 'Exudate Amount (滲液量)', 'Exudate amount');
+    String tissue = _extractVal(comps, 'Tissue Type (傷口組織)', 'Tissue type in wound bed');
+    String woundTempStr = _extractVal(comps, 'Wound Center Temperature', 'Body temperature');
     String deltaTStr = _extractVal(comps, 'Temperature Difference (Delta T)');
-    
+   
     double? deltaT = double.tryParse(deltaTStr);
     Color deltaColor = Colors.grey;
     String alertText = '溫差評估';
@@ -480,7 +511,6 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
         alertText = '❄️ 缺血壞死 (ΔT $deltaT°C)';
       }
     }
-
     return Card(
       elevation: 4, margin: const EdgeInsets.only(bottom: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       child: Padding(
@@ -488,7 +518,6 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // 標題列：自適應收合時間
             Row(
               children: [
                 const Icon(Icons.accessibility_new, color: Colors.blueAccent, size: 20),
@@ -513,19 +542,17 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
               ],
             ),
             const Divider(height: 16, color: Colors.white12),
-            
-            // 🌟 修正點：使用 Wrap 替代 Row，在 iPhone 窄螢幕上自動整齊換行，徹底消滅 24px 溢出
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8), 
-              margin: const EdgeInsets.only(bottom: 10), 
-              decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.05), borderRadius: BorderRadius.circular(8)), 
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              margin: const EdgeInsets.only(bottom: 10),
+              decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.05), borderRadius: BorderRadius.circular(8)),
               child: Wrap(
-                alignment: WrapAlignment.spaceAround, 
+                alignment: WrapAlignment.spaceAround,
                 runSpacing: 6,
                 spacing: 10,
                 children: [
-                  Text('💧 滲液: ${exudate.isEmpty ? '未評估' : exudate}', style: const TextStyle(fontSize: 12, color: Colors.amberAccent)), 
+                  Text('💧 滲液: ${exudate.isEmpty ? '未評估' : exudate}', style: const TextStyle(fontSize: 12, color: Colors.amberAccent)),
                   Text('🔬 組織: ${tissue.isEmpty ? '未評估' : tissue}', style: const TextStyle(fontSize: 12, color: Colors.lightGreenAccent)),
                   if (woundTempStr.isNotEmpty) Text('🌡️ 傷口: $woundTempStr°C', style: const TextStyle(fontSize: 12, color: Colors.white70)),
                 ]
@@ -537,24 +564,22 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
                 decoration: BoxDecoration(color: deltaColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(6), border: Border.all(color: deltaColor.withValues(alpha: 0.5))),
                 child: Center(child: Text(alertText, style: TextStyle(color: deltaColor, fontWeight: FontWeight.bold, fontSize: 13))),
               ),
-            
-            // 影像疊合區塊
             ClipRRect(
-              borderRadius: BorderRadius.circular(10), 
+              borderRadius: BorderRadius.circular(10),
               child: Container(
-                color: Colors.black, 
+                color: Colors.black,
                 width: double.infinity,
-                child: _isParsing 
+                child: _isParsing
                   ? const AspectRatio(aspectRatio: 4/3, child: Center(child: CircularProgressIndicator()))
                   : AspectRatio(
-                      aspectRatio: 4 / 3, 
+                      aspectRatio: 4 / 3,
                       child: Stack(
-                        alignment: Alignment.center, 
+                        alignment: Alignment.center,
                         children: [
-                          _buildImageProvider(_rgbUrl), 
+                          _buildImageProvider(_rgbUrl),
                           Positioned.fill(
                             child: Opacity(
-                              opacity: _thermalOpacity, 
+                              opacity: _thermalOpacity,
                               child: _buildImageProvider(_thermalUrl)
                             )
                           )
@@ -565,15 +590,15 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
             ),
             const SizedBox(height: 12),
             Row(children: [
-              const Text('光學', style: TextStyle(fontSize: 13, color: Colors.blueAccent, fontWeight: FontWeight.bold)), 
+              const Text('光學', style: TextStyle(fontSize: 13, color: Colors.blueAccent, fontWeight: FontWeight.bold)),
               Expanded(
                 child: Slider(
-                  value: _thermalOpacity, 
-                  min: 0.0, max: 1.0, 
-                  activeColor: Colors.deepOrangeAccent, inactiveColor: Colors.blueAccent.withValues(alpha: 0.3), 
+                  value: _thermalOpacity,
+                  min: 0.0, max: 1.0,
+                  activeColor: Colors.deepOrangeAccent, inactiveColor: Colors.blueAccent.withValues(alpha: 0.3),
                   onChanged: (v) => setState(() => _thermalOpacity = v)
                 )
-              ), 
+              ),
               const Text('透視', style: TextStyle(fontSize: 13, color: Colors.deepOrangeAccent, fontWeight: FontWeight.bold))
             ]),
           ],
@@ -584,23 +609,20 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
 }
 
 // =======================================================
-// === 第二頁：歷史紀錄頁 (🌟 Timestamp 排序保護版) ===
+// === 第二頁：歷史紀錄頁 ===
 // =======================================================
-class PatientHistoryPage extends StatefulWidget { 
-  final Patient patient; 
-  const PatientHistoryPage({super.key, required this.patient}); 
-  @override State<PatientHistoryPage> createState() => _PatientHistoryPageState(); 
+class PatientHistoryPage extends StatefulWidget {
+  final Patient patient;
+  const PatientHistoryPage({super.key, required this.patient});
+  @override State<PatientHistoryPage> createState() => _PatientHistoryPageState();
 }
-
 class _PatientHistoryPageState extends State<PatientHistoryPage> {
   late Stream<QuerySnapshot> _historyStream;
-  String _selectedSite = '全部'; 
-
-  @override void initState() { 
-    super.initState(); 
-    _historyStream = FirebaseFirestore.instance.collection('observations').where('subject.reference', isEqualTo: 'Patient/${widget.patient.id}').snapshots(); 
+  String _selectedSite = '全部';
+  @override void initState() {
+    super.initState();
+    _historyStream = FirebaseFirestore.instance.collection('observations').where('subject.reference', isEqualTo: 'Patient/${widget.patient.id}').snapshots();
   }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -613,27 +635,25 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
             child: Column(
               children: [
                 Container(
-                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16), 
-                  color: const Color(0xFF1E1E1E), 
+                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                  color: const Color(0xFF1E1E1E),
                   child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround, 
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
                     children: [
-                      _infoItem(Icons.hotel, '床號', widget.patient.bedNumber), 
-                      _infoItem(Icons.badge, '病歷號', widget.patient.id), 
+                      _infoItem(Icons.hotel, '床號', widget.patient.bedNumber),
+                      _infoItem(Icons.badge, '病歷號', widget.patient.id),
                       _infoItem(Icons.analytics, 'Braden', '${widget.patient.bradenScore.toInt()}分')
                     ]
                   )
                 ),
                 Expanded(
                   child: StreamBuilder<QuerySnapshot>(
-                    stream: _historyStream, 
+                    stream: _historyStream,
                     builder: (context, snapshot) {
                       if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
                       if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('目前無歷史紀錄，請新增', style: TextStyle(color: Colors.grey, fontSize: 16)));
-                      
+                     
                       var docs = snapshot.data!.docs;
-                      
-                      // 🌟 安全排序防禦：防止 null 導致崩潰
                       docs.sort((a, b) {
                         final aMap = a.data() as Map<String, dynamic>;
                         final bMap = b.data() as Map<String, dynamic>;
@@ -644,23 +664,23 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                         }
                         return 0;
                       });
-            
+           
                       Set<String> sites = {'全部'};
                       for (var d in docs) {
                         String s = (d.data() as Map)['bodySite']?['text'] ?? '';
                         if (s.isNotEmpty) sites.add(s);
                       }
-            
+           
                       var filteredDocs = docs;
                       if (_selectedSite != '全部') filteredDocs = docs.where((d) => ((d.data() as Map)['bodySite']?['text'] ?? '') == _selectedSite).toList();
-            
+           
                       return Column(
                         children: [
                           Container(
                             width: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), color: const Color(0xFF121212),
                             child: SingleChildScrollView(
                               scrollDirection: Axis.horizontal,
-                              physics: const AlwaysScrollableScrollPhysics(), 
+                              physics: const AlwaysScrollableScrollPhysics(),
                               child: Row(
                                 children: sites.map((site) {
                                   bool isSelected = _selectedSite == site;
@@ -680,23 +700,23 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                             child: filteredDocs.isEmpty
                                 ? const Center(child: Text('此部位無歷史紀錄', style: TextStyle(color: Colors.white70, fontSize: 15)))
                                 : ListView.builder(
-                                    physics: const AlwaysScrollableScrollPhysics(), 
-                                    padding: const EdgeInsets.only(left: 10, right: 10, top: 4, bottom: 100), 
-                                    itemCount: filteredDocs.length, 
+                                    physics: const AlwaysScrollableScrollPhysics(),
+                                    padding: const EdgeInsets.only(left: 10, right: 10, top: 4, bottom: 100),
+                                    itemCount: filteredDocs.length,
                                     itemBuilder: (c, i) => DualModalOverlayCard(
-                                      docId: filteredDocs[i].id, data: filteredDocs[i].data() as Map<String, dynamic>, 
-                                      onDelete: () { 
+                                      docId: filteredDocs[i].id, data: filteredDocs[i].data() as Map<String, dynamic>,
+                                      onDelete: () {
                                         showDialog(
-                                          context: context, 
+                                          context: context,
                                           builder: (ctx) => AlertDialog(
-                                            title: const Text('⚠️ 刪除紀錄', style: TextStyle(fontSize: 18)), 
-                                            content: const Text('確定刪除紀錄？', style: TextStyle(fontSize: 15)), 
+                                            title: const Text('⚠️ 刪除紀錄', style: TextStyle(fontSize: 18)),
+                                            content: const Text('確定刪除紀錄？', style: TextStyle(fontSize: 15)),
                                             actions: [
-                                              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')), 
+                                              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
                                               ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () async { Navigator.pop(ctx); await FirebaseFirestore.instance.collection('observations').doc(filteredDocs[i].id).delete(); }, child: const Text('刪除', style: TextStyle(color: Colors.white)))
                                             ]
                                           )
-                                        ); 
+                                        );
                                       }
                                     )
                                   ),
@@ -712,10 +732,10 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
         ),
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => BodyPartSelectionPage(patient: widget.patient))), 
-        icon: const Icon(Icons.camera_alt, size: 20), 
-        label: const Text('新增紀錄', style: TextStyle(fontSize: 15)), 
-        backgroundColor: Colors.blueAccent, 
+        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => BodyPartSelectionPage(patient: widget.patient))),
+        icon: const Icon(Icons.camera_alt, size: 20),
+        label: const Text('新增紀錄', style: TextStyle(fontSize: 15)),
+        backgroundColor: Colors.blueAccent,
         foregroundColor: Colors.white
       ),
     );
@@ -731,43 +751,37 @@ class WoundCaptureWizardPage extends StatefulWidget {
   const WoundCaptureWizardPage({super.key, required this.partName});
   @override State<WoundCaptureWizardPage> createState() => _WoundCaptureWizardPageState();
 }
-
 class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
-  int _currentStep = 0; 
+  int _currentStep = 0;
   final ImagePicker _picker = ImagePicker();
   final ThermalCameraService _thermalService = MockThermalCamera();
-
-  Uint8List? rgbBytes; 
-  Uint8List? thermalBytes; 
-  
-  Offset _woundPoint = const Offset(0.5, 0.5); 
-  Offset _refPoint = const Offset(0.2, 0.8);   
-
+  Uint8List? rgbBytes;
+  Uint8List? thermalBytes;
+ 
+  Offset _woundPoint = const Offset(0.5, 0.5);
+  Offset _refPoint = const Offset(0.2, 0.8);  
   double _woundTemp = 38.2;
   double _referenceTemp = 35.8;
-  
+ 
   final WoundFeatureData featureData = WoundFeatureData();
-
   Future<void> _captureRGB() async {
     try {
       final photo = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 60, maxWidth: 600, maxHeight: 600);
-      if (photo == null) return; 
+      if (photo == null) return;
       final bytes = await photo.readAsBytes();
       setState(() { rgbBytes = bytes; });
     } catch (e) { debugPrint(e.toString()); }
   }
-
   Future<void> _captureThermal() async {
     final thermalData = await _thermalService.captureThermalData();
     if (thermalData != null) {
-      setState(() { 
-        thermalBytes = thermalData['imageBytes']; 
-        _woundTemp = thermalData['woundTemp']; 
+      setState(() {
+        thermalBytes = thermalData['imageBytes'];
+        _woundTemp = thermalData['woundTemp'];
         _referenceTemp = thermalData['referenceTemp'];
       });
     }
   }
-
   Widget _buildDraggableMarker({
     required Offset position,
     required BoxConstraints constraints,
@@ -775,7 +789,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
     required IconData icon,
     required Function(Offset) onUpdate,
   }) {
-    const double touchAreaSize = 56.0; 
+    const double touchAreaSize = 56.0;
     return Positioned(
       left: position.dx * constraints.maxWidth - touchAreaSize / 2,
       top: position.dy * constraints.maxHeight - touchAreaSize / 2,
@@ -808,7 +822,6 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
       ),
     );
   }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -821,14 +834,14 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
             child: Column(
               children: [
                 Container(
-                  padding: const EdgeInsets.symmetric(vertical: 12), color: const Color(0xFF1E1E1E), 
+                  padding: const EdgeInsets.symmetric(vertical: 12), color: const Color(0xFF1E1E1E),
                   child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly, 
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
-                      _buildStepIcon(0, Icons.camera_alt, '1. 光學'), 
-                      const Icon(Icons.arrow_forward_ios, color: Colors.grey, size: 12), 
-                      _buildStepIcon(1, Icons.thermostat, '2. 熱影像與ΔT'), 
-                      const Icon(Icons.arrow_forward_ios, color: Colors.grey, size: 12), 
+                      _buildStepIcon(0, Icons.camera_alt, '1. 光學'),
+                      const Icon(Icons.arrow_forward_ios, color: Colors.grey, size: 12),
+                      _buildStepIcon(1, Icons.thermostat, '2. 熱影像與ΔT'),
+                      const Icon(Icons.arrow_forward_ios, color: Colors.grey, size: 12),
                       _buildStepIcon(2, Icons.assignment, '3. 評估')
                     ]
                   )
@@ -841,41 +854,39 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
       ),
     );
   }
-
   Widget _buildStepIcon(int stepIndex, IconData icon, String label) {
     bool isActive = _currentStep == stepIndex; bool isPast = _currentStep > stepIndex;
     Color color = isActive ? Colors.blueAccent : (isPast ? Colors.green : Colors.grey);
     return Column(children: [CircleAvatar(backgroundColor: color.withValues(alpha: 0.2), radius: 20, child: Icon(icon, color: color, size: 20)), const SizedBox(height: 4), Text(label, style: TextStyle(color: color, fontWeight: isActive ? FontWeight.bold : FontWeight.normal, fontSize: 12))]);
   }
-
   Widget _buildCurrentStepContent() {
     if (_currentStep == 0) {
       return Column(
-        mainAxisAlignment: MainAxisAlignment.center, 
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Text('請拍攝傷口 RGB 光學影像', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)), 
-          const SizedBox(height: 8), 
-          const Text('提示：移除敷料，保持鏡頭垂直傷口', style: TextStyle(color: Colors.grey, fontSize: 13)), 
-          const SizedBox(height: 20), 
-          if (rgbBytes != null) 
-            ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.memory(rgbBytes!, width: double.infinity, fit: BoxFit.contain, filterQuality: FilterQuality.low)), 
-          if (rgbBytes == null) 
+          const Text('請拍攝傷口 RGB 光學影像', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          const Text('提示：移除敷料，保持鏡頭垂直傷口', style: TextStyle(color: Colors.grey, fontSize: 13)),
+          const SizedBox(height: 20),
+          if (rgbBytes != null)
+            ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.memory(rgbBytes!, width: double.infinity, fit: BoxFit.contain, filterQuality: FilterQuality.low)),
+          if (rgbBytes == null)
             GestureDetector(
-              onTap: _captureRGB, 
+              onTap: _captureRGB,
               child: AspectRatio(
-                aspectRatio: 4/3, 
+                aspectRatio: 4/3,
                 child: Container(
-                  width: double.infinity, 
-                  decoration: BoxDecoration(color: Colors.black12, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.blueAccent, width: 2)), 
+                  width: double.infinity,
+                  decoration: BoxDecoration(color: Colors.black12, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.blueAccent, width: 2)),
                   child: const Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.camera_alt, size: 50, color: Colors.blueAccent), SizedBox(height: 8), Text('點擊選取光學影像', style: TextStyle(fontSize: 16, color: Colors.blueAccent))])
                 )
               )
-            ), 
-          const SizedBox(height: 28), 
-          if (rgbBytes != null) 
+            ),
+          const SizedBox(height: 28),
+          if (rgbBytes != null)
             Row(children: [
-              Expanded(child: OutlinedButton(onPressed: _captureRGB, child: const Text('重拍'))), 
-              const SizedBox(width: 12), 
+              Expanded(child: OutlinedButton(onPressed: _captureRGB, child: const Text('重拍'))),
+              const SizedBox(width: 12),
               Expanded(child: ElevatedButton(onPressed: () => setState(() => _currentStep = 1), child: const Text('下一步')))
             ])
         ]
@@ -883,16 +894,16 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
     } else if (_currentStep == 1) {
       double deltaT = _woundTemp - _referenceTemp;
       return Column(
-        mainAxisAlignment: MainAxisAlignment.center, 
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Text('熱影像採集與 ΔT 溫差測量', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)), 
-          const SizedBox(height: 6), 
-          const Text('👉 直接按住並拖曳畫面上的 🔴 與 🔵 標記', style: TextStyle(color: Colors.lightBlueAccent, fontSize: 13, fontWeight: FontWeight.bold)), 
-          const SizedBox(height: 14), 
-          
+          const Text('熱影像採集與 ΔT 溫差測量', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 6),
+          const Text('👉 直接按住並拖曳畫面上的 🔴 與 🔵 標記', style: TextStyle(color: Colors.lightBlueAccent, fontSize: 13, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 14),
+         
           if (thermalBytes != null) ...[
             ClipRRect(
-              borderRadius: BorderRadius.circular(12), 
+              borderRadius: BorderRadius.circular(12),
               child: AspectRatio(
                 aspectRatio: 4 / 3,
                 child: LayoutBuilder(
@@ -900,12 +911,12 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
                     return Stack(
                       children: [
                         Image.memory(thermalBytes!, width: constraints.maxWidth, height: constraints.maxHeight, fit: BoxFit.fill, filterQuality: FilterQuality.low),
-                        
+                       
                         _buildDraggableMarker(
-                          position: _refPoint, 
-                          constraints: constraints, 
-                          color: Colors.blueAccent, 
-                          icon: Icons.adjust, 
+                          position: _refPoint,
+                          constraints: constraints,
+                          color: Colors.blueAccent,
+                          icon: Icons.adjust,
                           onUpdate: (newOffset) {
                             setState(() {
                               _refPoint = newOffset;
@@ -913,12 +924,11 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
                             });
                           }
                         ),
-
                         _buildDraggableMarker(
-                          position: _woundPoint, 
-                          constraints: constraints, 
-                          color: Colors.redAccent, 
-                          icon: Icons.gps_fixed, 
+                          position: _woundPoint,
+                          constraints: constraints,
+                          color: Colors.redAccent,
+                          icon: Icons.gps_fixed,
                           onUpdate: (newOffset) {
                             setState(() {
                               _woundPoint = newOffset;
@@ -933,7 +943,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
               )
             ),
             const SizedBox(height: 12),
-            
+           
             Container(
               padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
               decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.05), borderRadius: BorderRadius.circular(8), border: Border.all(color: deltaT >= 2.0 ? Colors.redAccent : Colors.greenAccent)),
@@ -947,25 +957,25 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
               ),
             ),
           ],
-          
-          if (thermalBytes == null) 
+         
+          if (thermalBytes == null)
             GestureDetector(
-              onTap: _captureThermal, 
+              onTap: _captureThermal,
               child: AspectRatio(
-                aspectRatio: 4/3, 
+                aspectRatio: 4/3,
                 child: Container(
-                  width: double.infinity, 
-                  decoration: BoxDecoration(color: Colors.black12, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.deepOrangeAccent, width: 2)), 
+                  width: double.infinity,
+                  decoration: BoxDecoration(color: Colors.black12, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.deepOrangeAccent, width: 2)),
                   child: const Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(Icons.thermostat, size: 50, color: Colors.deepOrangeAccent), SizedBox(height: 8), Text('點擊選取熱影像', style: TextStyle(fontSize: 16, color: Colors.deepOrangeAccent))])
                 )
               )
-            ), 
-          const SizedBox(height: 28), 
+            ),
+          const SizedBox(height: 28),
           Row(
             children: [
-              Expanded(child: OutlinedButton(onPressed: () => setState(() => _currentStep = 0), child: const Text('上一步'))), 
+              Expanded(child: OutlinedButton(onPressed: () => setState(() => _currentStep = 0), child: const Text('上一步'))),
               if (thermalBytes != null) ...[
-                const SizedBox(width: 12), 
+                const SizedBox(width: 12),
                 Expanded(child: ElevatedButton(onPressed: () => setState(() => _currentStep = 2), child: const Text('下一步')))
               ]
             ]
@@ -974,54 +984,54 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
       );
     } else {
       return Column(
-        crossAxisAlignment: CrossAxisAlignment.start, 
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('📝 臨床特徵評估', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)), 
-          const SizedBox(height: 16), 
-          const Text('滲液量 (Exudate)', style: TextStyle(fontSize: 15, color: Colors.amberAccent)), 
-          const SizedBox(height: 6), 
+          const Text('📝 臨床特徵評估', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 16),
+          const Text('滲液量 (Exudate)', style: TextStyle(fontSize: 15, color: Colors.amberAccent)),
+          const SizedBox(height: 6),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14), decoration: BoxDecoration(color: const Color(0xFF2C2C2C), borderRadius: BorderRadius.circular(8)), 
+            padding: const EdgeInsets.symmetric(horizontal: 14), decoration: BoxDecoration(color: const Color(0xFF2C2C2C), borderRadius: BorderRadius.circular(8)),
             child: DropdownButtonHideUnderline(
               child: DropdownButton<String>(
-                value: featureData.exudateAmount, isExpanded: true, style: const TextStyle(fontSize: 16, color: Colors.white), 
-                items: ['無', '少量', '中量', '大量'].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(), 
+                value: featureData.exudateAmount, isExpanded: true, style: const TextStyle(fontSize: 16, color: Colors.white),
+                items: ['無', '少量', '中量', '大量'].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
                 onChanged: (val) => setState(() => featureData.exudateAmount = val!)
               )
             )
-          ), 
-          const SizedBox(height: 20), 
-          const Text('主要組織狀態 (Tissue Type)', style: TextStyle(fontSize: 15, color: Colors.lightGreenAccent)), 
-          const SizedBox(height: 6), 
+          ),
+          const SizedBox(height: 20),
+          const Text('主要組織狀態 (Tissue Type)', style: TextStyle(fontSize: 15, color: Colors.lightGreenAccent)),
+          const SizedBox(height: 6),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14), decoration: BoxDecoration(color: const Color(0xFF2C2C2C), borderRadius: BorderRadius.circular(8)), 
+            padding: const EdgeInsets.symmetric(horizontal: 14), decoration: BoxDecoration(color: const Color(0xFF2C2C2C), borderRadius: BorderRadius.circular(8)),
             child: DropdownButtonHideUnderline(
               child: DropdownButton<String>(
-                value: featureData.tissueType, isExpanded: true, style: const TextStyle(fontSize: 16, color: Colors.white), 
-                items: ['紅色肉芽組織', '黃色腐肉', '黑色焦痂', '上皮化組織'].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(), 
+                value: featureData.tissueType, isExpanded: true, style: const TextStyle(fontSize: 16, color: Colors.white),
+                items: ['紅色肉芽組織', '黃色腐肉', '黑色焦痂', '上皮化組織'].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
                 onChanged: (val) => setState(() => featureData.tissueType = val!)
               )
             )
-          ), 
-          const SizedBox(height: 32), 
+          ),
+          const SizedBox(height: 32),
           Row(
             children: [
-              Expanded(child: OutlinedButton(onPressed: () => setState(() => _currentStep = 1), child: const Text('上一步'))), 
-              const SizedBox(width: 12), 
+              Expanded(child: OutlinedButton(onPressed: () => setState(() => _currentStep = 1), child: const Text('上一步'))),
+              const SizedBox(width: 12),
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: () { 
+                  onPressed: () {
                     final record = WoundPhotoRecord(
-                      rgbBytes: rgbBytes!, 
-                      thermalBytes: thermalBytes!, 
-                      features: featureData, 
+                      rgbBytes: rgbBytes!,
+                      thermalBytes: thermalBytes!,
+                      features: featureData,
                       woundTemp: _woundTemp,
                       referenceTemp: _referenceTemp,
-                    ); 
-                    Navigator.pop(context, record); 
-                  }, 
-                  icon: const Icon(Icons.check, size: 18), 
-                  label: const Text('完成並暫存'), 
+                    );
+                    Navigator.pop(context, record);
+                  },
+                  icon: const Icon(Icons.check, size: 18),
+                  label: const Text('完成並暫存'),
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.green)
                 )
               )
@@ -1041,10 +1051,6 @@ class BodyPartSelectionPage extends StatefulWidget {
   const BodyPartSelectionPage({super.key, required this.patient});
   @override State<BodyPartSelectionPage> createState() => _BodyPartSelectionPageState();
 }
-
-// =======================================================
-// === 第三頁：部位選擇與上傳 (修復定位與點擊邏輯版) ===
-// =======================================================
 class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
   bool isBackView = true;
   final Map<String, WoundPhotoRecord> _capturedWounds = {};
@@ -1054,6 +1060,71 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
   void initState() {
     super.initState();
     _woundsStream = FirebaseFirestore.instance.collection('observations').where('subject.reference', isEqualTo: 'Patient/${widget.patient.id}').snapshots();
+  }
+
+  // 🚀 功能：打包為純文字 JSON 並一鍵複製 (不需安裝其他套件，完美相容網頁版)
+  void _exportFHIRJson() {
+    if (_capturedWounds.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('⚠️ 尚未拍攝任何部位影像', style: TextStyle(fontSize: 15)), backgroundColor: Colors.orange));
+      return;
+    }
+    
+    // 收集所有拍攝的傷口，轉換成標準 FHIR 格式的 List
+    List<Map<String, dynamic>> fhirBundle = [];
+    for (var entry in _capturedWounds.entries) {
+      String partName = entry.key;
+      WoundPhotoRecord record = entry.value;
+      
+      final fhirObservation = FhirWoundObservation(
+        subject: widget.patient,
+        bodySite: partName,
+        bradenScore: widget.patient.bradenScore,
+        features: record.features,
+        rgbBase64: base64Encode(record.rgbBytes),
+        thermalBase64: base64Encode(record.thermalBytes),
+        woundTemp: record.woundTemp,
+        referenceTemp: record.referenceTemp,
+      );
+      fhirBundle.add(fhirObservation.toFhirJson());
+    }
+
+    // 將 List 排版並轉換成漂亮的 JSON 字串
+    JsonEncoder encoder = const JsonEncoder.withIndent('  ');
+    String jsonString = encoder.convert(fhirBundle);
+
+    // 彈出對話框讓你複製
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Row(children: [Icon(Icons.data_object, color: Colors.blueAccent), SizedBox(width: 8), Text('匯出 FHIR JSON')]),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 400,
+          child: Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(8)),
+            child: SingleChildScrollView(
+              child: SelectableText(jsonString, style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: Colors.greenAccent)),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('關閉', style: TextStyle(color: Colors.grey))),
+          ElevatedButton.icon(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: jsonString)); // 複製到剪貼簿
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ JSON 已複製到剪貼簿！可直接貼上存檔', style: TextStyle(fontSize: 14)), backgroundColor: Colors.green));
+                Navigator.pop(context);
+              }
+            },
+            icon: const Icon(Icons.copy, size: 18),
+            label: const Text('複製全部'),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+          )
+        ]
+      )
+    );
   }
 
   Future<void> _uploadAllToHospitalSystem() async {
@@ -1067,16 +1138,14 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       for (var entry in _capturedWounds.entries) {
         String partName = entry.key;
         WoundPhotoRecord record = entry.value;
-        String rgbBase64 = base64Encode(record.rgbBytes);
-        String thermalBase64 = base64Encode(record.thermalBytes);
        
         final fhirObservation = FhirWoundObservation(
           subject: widget.patient,
           bodySite: partName,
           bradenScore: widget.patient.bradenScore,
           features: record.features,
-          rgbBase64: rgbBase64,
-          thermalBase64: thermalBase64,
+          rgbBase64: base64Encode(record.rgbBytes),
+          thermalBase64: base64Encode(record.thermalBytes),
           woundTemp: record.woundTemp,
           referenceTemp: record.referenceTemp,
         );
@@ -1103,38 +1172,28 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
     )
   );
 
- // // 🌟 1. 建立背部紅點 (依據截圖精準覆蓋原圖紅點版)
+  // 🌟 1. 建立背部紅點 (依據截圖精準無邊界覆蓋版)
   List<Widget> _buildBackDots(BuildContext context, Set<String> existing) => [
     _point(context, 0.73, 0.12, '後腦勺 (Back of Head)', existing),
-    
-    // 肩胛骨 (向外推，蓋住原圖紅點)
     _point(context, 0.58, 0.23, '左側肩胛骨 (L Shoulder Blade)', existing), 
     _point(context, 0.88, 0.23, '右側肩胛骨 (R Shoulder Blade)', existing),
-    
-    // 手肘 (往上提，且右邊極度靠右，無視邊界)
     _point(context, 0.46, 0.38, '左側肘部 (L Elbow)', existing),
     _point(context, 0.98, 0.38, '右側肘部 (R Elbow)', existing),
-    
-    // 脊椎與薦骨 (上下拉開，拒絕重疊)
     _point(context, 0.73, 0.40, '脊椎 (Spine)', existing),
     _point(context, 0.73, 0.50, '薦骨/尾椎 (Sacrum)', existing),
-    
-    // 坐骨脊 (大幅往上提，對齊臀部下緣紅點)
     _point(context, 0.65, 0.55, '左側坐骨脊 (L Ischial Tuberosity)', existing),
     _point(context, 0.81, 0.55, '右側坐骨脊 (R Ischial Tuberosity)', existing),
-    
-    // 足跟 (往下拉，對齊最底下的紅點，避開腳踝)
     _point(context, 0.68, 0.89, '左側足跟 (L Heel)', existing),
     _point(context, 0.78, 0.89, '右側足跟 (R Heel)', existing),
   ];
 
-  // 🌟 2. 建立正面紅點 (對應 body_front.png.jpg，維持原來的 11 個部位)
+  // 🌟 2. 建立正面紅點 (精準覆蓋版)
   List<Widget> _buildFrontDots(BuildContext context, Set<String> existing) => [
     _point(context, 0.30, 0.16, '右側耳部 (R Ear)', existing), 
     _point(context, 0.47, 0.16, '左側耳部 (L Ear)', existing),
     _point(context, 0.19, 0.25, '右側肩部 (R Shoulder)', existing),
     _point(context, 0.57, 0.25, '左側肩部 (L Shoulder)', existing),
-    _point(context, 0.38, 0.34, '胸廓中央 (Chest)', existing), // 置於胸部中央
+    _point(context, 0.38, 0.34, '胸廓中央 (Chest)', existing), 
     _point(context, 0.26, 0.44, '右側髖部 (R Hip)', existing),
     _point(context, 0.50, 0.44, '左側髖部 (L Hip)', existing),
     _point(context, 0.32, 0.66, '右側膝蓋 (R Knee)', existing),
@@ -1142,11 +1201,10 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
     _point(context, 0.33, 0.87, '右側足趾 (R Toes)', existing),
     _point(context, 0.45, 0.87, '左側足趾 (L Toes)', existing),
   ];
-  // 🌟 3. 修復後的 _point 函數與完整的點擊邏輯
+
   Widget _point(BuildContext context, double xPercent, double yPercent, String name, Set<String> existing) {
     bool isTaken = _capturedWounds.containsKey(name) || existing.contains(name);
    
-    // 將 0.0 ~ 1.0 的百分比轉換為 Align 需要的 -1.0 ~ 1.0
     return Align(
       alignment: Alignment(
         (xPercent * 2) - 1,
@@ -1165,7 +1223,7 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
           }
         },
         child: Container(
-          width: 36, // 恢復你原本的按鈕大小
+          width: 36, 
           height: 36,
           decoration: BoxDecoration(
             color: isTaken ? Colors.greenAccent.withValues(alpha: 0.9) : Colors.redAccent.withValues(alpha: 0.85), 
@@ -1214,53 +1272,69 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
                   const Padding(padding: EdgeInsets.symmetric(vertical: 12), child: Text('點選圖上位置進行拍攝：', style: TextStyle(color: Colors.grey, fontSize: 14))),
                  
                   LayoutBuilder(
-  builder: (context, constraints) {
-    double maxWidth = constraints.maxWidth;
-    double containerWidth;
+                    builder: (context, constraints) {
+                      double maxWidth = constraints.maxWidth;
+                      double containerWidth;
 
-    // 🌟 新增判斷：如果是大螢幕（電腦版、網頁版、平板）
-    if (maxWidth > 600) {
-      // 電腦版設定：根據視窗的「高度」來動態放大，讓他佔據螢幕約 65% 的高度
-      double screenHeight = MediaQuery.of(context).size.height;
-      double targetHeight = screenHeight * 0.65; 
-      containerWidth = targetHeight * (350 / 600); 
-    } else {
-      // 📱 手機版設定：維持你原本的邏輯，完全不改動！
-      containerWidth = isLandscape ? 180 : (maxWidth > 380 ? 380 : maxWidth * 0.92);
-    }
+                      // 🌟 電腦版/平板動態放大判斷
+                      if (maxWidth > 600) {
+                        double screenHeight = MediaQuery.of(context).size.height;
+                        double targetHeight = screenHeight * 0.65; 
+                        containerWidth = targetHeight * (350 / 600); 
+                      } else {
+                        // 📱 手機版維持不變
+                        containerWidth = isLandscape ? 180 : (maxWidth > 380 ? 380 : maxWidth * 0.92);
+                      }
 
-    double containerHeight = containerWidth * (600 / 350);
-   
-    return Center(
-      child: Container(
-        width: containerWidth, height: containerHeight, decoration: BoxDecoration(color: const Color(0xFF1E1E1E), border: Border.all(color: Colors.grey.shade800), borderRadius: BorderRadius.circular(16)),
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            ClipRRect(borderRadius: BorderRadius.circular(16), child: Image.asset(isBackView ? 'assets/images/body_back.png.jpg' : 'assets/images/body_front.png.jpg', width: containerWidth, height: containerHeight, fit: BoxFit.fill, errorBuilder: (c,e,s) => const Center(child: Text("找不到圖片")))),
-            
-            // 呼叫紅點
-            if (isBackView) ..._buildBackDots(context, existingWounds),
-            if (!isBackView) ..._buildFrontDots(context, existingWounds),
-          ],
-        ),
-      ),
-    );
-  }
-),
-                  const SizedBox(height: 100),
+                      double containerHeight = containerWidth * (600 / 350);
+                     
+                      return Center(
+                        child: Container(
+                          width: containerWidth, height: containerHeight, decoration: BoxDecoration(color: const Color(0xFF1E1E1E), border: Border.all(color: Colors.grey.shade800), borderRadius: BorderRadius.circular(16)),
+                          child: Stack(
+                            alignment: Alignment.center,
+                            // 🌟 超出範圍的點位也不會被裁切掉 (Clip.none)
+                            clipBehavior: Clip.none,
+                            children: [
+                              ClipRRect(borderRadius: BorderRadius.circular(16), child: Image.asset(isBackView ? 'assets/images/body_back.png.jpg' : 'assets/images/body_front.png.jpg', width: containerWidth, height: containerHeight, fit: BoxFit.fill, errorBuilder: (c,e,s) => const Center(child: Text("找不到圖片")))),
+                              
+                              if (isBackView) ..._buildBackDots(context, existingWounds),
+                              if (!isBackView) ..._buildFrontDots(context, existingWounds),
+                            ],
+                          ),
+                        ),
+                      );
+                    }
+                  ),
+                  const SizedBox(height: 150),
                 ],
               ),
             );
           }
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _uploadAllToHospitalSystem,
-        icon: const Icon(Icons.cloud_upload, size: 20),
-        label: const Text('上傳 FHIR 病歷', style: TextStyle(fontSize: 15)),
-        backgroundColor: Colors.green,
-        foregroundColor: Colors.white
+      // 🌟 新增的兩顆浮動按鈕：上傳 與 匯出 JSON
+      floatingActionButton: Column(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          FloatingActionButton.extended(
+            heroTag: 'export_json',
+            onPressed: _exportFHIRJson,
+            icon: const Icon(Icons.data_object, size: 20),
+            label: const Text('匯出 JSON', style: TextStyle(fontSize: 15)),
+            backgroundColor: Colors.indigoAccent,
+            foregroundColor: Colors.white
+          ),
+          const SizedBox(height: 12),
+          FloatingActionButton.extended(
+            heroTag: 'upload_db',
+            onPressed: _uploadAllToHospitalSystem,
+            icon: const Icon(Icons.cloud_upload, size: 20),
+            label: const Text('上傳 FHIR 病歷', style: TextStyle(fontSize: 15)),
+            backgroundColor: Colors.green,
+            foregroundColor: Colors.white
+          ),
+        ],
       ),
     );
   }
