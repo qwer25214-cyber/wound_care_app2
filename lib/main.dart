@@ -107,6 +107,7 @@ class WoundPhotoRecord {
   final WoundFeatureData features;
   final double woundTemp;
   final double referenceTemp;
+  final DateTime captureTime; // 🌟 支援自訂拍攝時間
   double get deltaT => woundTemp - referenceTemp;
   WoundPhotoRecord({
     required this.rgbBytes,
@@ -114,6 +115,7 @@ class WoundPhotoRecord {
     required this.features,
     required this.woundTemp,
     required this.referenceTemp,
+    required this.captureTime,
   });
 }
 
@@ -126,80 +128,34 @@ class FhirWoundObservation {
   final String thermalBase64;
   final double woundTemp;
   final double referenceTemp;
+  final DateTime captureTime; // 🌟 支援自訂拍攝時間
+  
   FhirWoundObservation({
-    required this.subject,
-    required this.bodySite,
-    required this.bradenScore,
-    required this.features,
-    required this.rgbBase64,
-    required this.thermalBase64,
-    required this.woundTemp,
-    required this.referenceTemp,
+    required this.subject, required this.bodySite, required this.bradenScore,
+    required this.features, required this.rgbBase64, required this.thermalBase64,
+    required this.woundTemp, required this.referenceTemp, required this.captureTime,
   });
+
   Map<String, dynamic> toFhirJson() {
     double deltaT = woundTemp - referenceTemp;
-    String nowIso = DateTime.now().toUtc().toIso8601String();
+    String recordIso = captureTime.toUtc().toIso8601String(); // 🌟 綁定護理人員實際拍攝的時間
     return {
       "resourceType": "Observation",
       "status": "final",
-      "category": [
-        {
-          "coding": [
-            {
-              "system": "http://terminology.hl7.org/CodeSystem/observation-category",
-              "code": "exam",
-              "display": "Exam"
-            }
-          ]
-        }
-      ],
-      "code": {
-        "coding": [
-          {"system": "http://loinc.org", "code": "39126-8", "display": "Wound assessment panel"} 
-        ],
-        "text": "熱影像傷口評估報告"
-      },
-      "subject": {
-        "reference": "Patient/${subject.id}",
-        "display": subject.name
-      },
-      "effectiveDateTime": nowIso,
-      "bodySite": {
-        "text": bodySite 
-      },
+      "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam", "display": "Exam"}]}],
+      "code": {"coding": [{"system": "http://loinc.org", "code": "39126-8", "display": "Wound assessment panel"}], "text": "熱影像傷口評估報告"},
+      "subject": {"reference": "Patient/${subject.id}", "display": subject.name},
+      "effectiveDateTime": recordIso,
+      "bodySite": {"text": bodySite},
       "component": [
-        {
-          "code": {"coding": [{"system": "http://loinc.org", "code": "38228-3", "display": "Braden scale total score"}]},
-          "valueQuantity": {"value": bradenScore, "system": "http://unitsofmeasure.org", "code": "{score}"}
-        },
-        {
-          "code": {"coding": [{"system": "http://loinc.org", "code": "72290-0", "display": "Exudate amount"}]},
-          "valueCodeableConcept": {"text": features.exudateAmount} 
-        },
-        {
-          "code": {"coding": [{"system": "http://loinc.org", "code": "72289-2", "display": "Tissue type in wound bed"}]},
-          "valueCodeableConcept": {"text": features.tissueType}
-        },
-        {
-          "code": {"coding": [{"system": "http://loinc.org", "code": "72728-9", "display": "Wound image"}]},
-          "valueAttachment": {"contentType": "image/jpeg", "data": rgbBase64, "title": "RGB Optical Image"}
-        },
-        {
-          "code": {"coding": [{"system": "http://loinc.org", "code": "72728-9", "display": "Thermal Image"}]},
-          "valueAttachment": {"contentType": "image/jpeg", "data": thermalBase64, "title": "Thermal Infrared Image"}
-        },
-        {
-          "code": {"coding": [{"system": "http://loinc.org", "code": "8310-5", "display": "Body temperature"}]},
-          "valueQuantity": {"value": woundTemp, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
-        },
-        {
-          "code": {"text": "Periwound Reference Temperature"},
-          "valueQuantity": {"value": referenceTemp, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
-        },
-        {
-          "code": {"text": "Temperature Difference (Delta T)"},
-          "valueQuantity": {"value": double.parse(deltaT.toStringAsFixed(1)), "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
-        }
+        {"code": {"coding": [{"system": "http://loinc.org", "code": "38228-3", "display": "Braden scale total score"}]}, "valueQuantity": {"value": bradenScore, "system": "http://unitsofmeasure.org", "code": "{score}"}},
+        {"code": {"coding": [{"system": "http://loinc.org", "code": "72290-0", "display": "Exudate amount"}]}, "valueCodeableConcept": {"text": features.exudateAmount}},
+        {"code": {"coding": [{"system": "http://loinc.org", "code": "72289-2", "display": "Tissue type in wound bed"}]}, "valueCodeableConcept": {"text": features.tissueType}},
+        {"code": {"coding": [{"system": "http://loinc.org", "code": "72728-9", "display": "Wound image"}]}, "valueAttachment": {"contentType": "image/jpeg", "data": rgbBase64, "title": "RGB Optical Image"}},
+        {"code": {"coding": [{"system": "http://loinc.org", "code": "72728-9", "display": "Thermal Image"}]}, "valueAttachment": {"contentType": "image/jpeg", "data": thermalBase64, "title": "Thermal Infrared Image"}},
+        {"code": {"coding": [{"system": "http://loinc.org", "code": "8310-5", "display": "Body temperature"}]}, "valueQuantity": {"value": woundTemp, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}},
+        {"code": {"text": "Periwound Reference Temperature"}, "valueQuantity": {"value": referenceTemp, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}},
+        {"code": {"text": "Temperature Difference (Delta T)"}, "valueQuantity": {"value": double.parse(deltaT.toStringAsFixed(1)), "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}}
       ]
     };
   }
@@ -313,7 +269,6 @@ class _PatientListPageState extends State<PatientListPage> {
                         side: BorderSide(color: p.bradenScore <= 12 ? Colors.redAccent.withValues(alpha: 0.6) : Colors.transparent, width: 1.5)
                       ),
                       child: InkWell(
-                        // 🌟 修改處：同時傳遞 patient 與 patientDocId
                         onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => PatientHistoryPage(patient: p, patientDocId: docId))),
                         borderRadius: BorderRadius.circular(14),
                         child: Padding(
@@ -450,7 +405,16 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
     if (padding != 0) cleanString += '=' * (4 - padding);
     return 'data:image/jpeg;base64,$cleanString';
   }
-  String _formatDateSafe(dynamic t) {
+  
+  // 🌟 優先讀取 FHIR 標準的 effectiveDateTime，作為卡片時間顯示
+  String _formatDateSafe(Map<String, dynamic> data) {
+    if (data['effectiveDateTime'] != null) {
+      try {
+        DateTime d = DateTime.parse(data['effectiveDateTime']).toLocal();
+        return '${d.month.toString().padLeft(2,'0')}/${d.day.toString().padLeft(2,'0')} ${d.hour.toString().padLeft(2,'0')}:${d.minute.toString().padLeft(2,'0')}';
+      } catch (_) {}
+    }
+    dynamic t = data['timestamp'];
     if (t == null) return '剛剛記錄';
     if (t is Timestamp) {
       DateTime d = t.toDate();
@@ -537,7 +501,7 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
                   ),
                 ),
                 Text(
-                  _formatDateSafe(widget.data['timestamp']),
+                  _formatDateSafe(widget.data),
                   style: const TextStyle(color: Colors.grey, fontSize: 11),
                 ),
                 IconButton(
@@ -616,11 +580,11 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
 }
 
 // =======================================================
-// === 第二頁：歷史紀錄頁 ===
+// === 第二頁：歷史紀錄頁 (時間軸 Timeline 版) ===
 // =======================================================
 class PatientHistoryPage extends StatefulWidget {
   final Patient patient;
-  final String patientDocId; // 🌟 接收 Document ID
+  final String patientDocId; 
   const PatientHistoryPage({super.key, required this.patient, required this.patientDocId});
   @override State<PatientHistoryPage> createState() => _PatientHistoryPageState();
 }
@@ -630,7 +594,6 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
   
   @override void initState() {
     super.initState();
-    // 🌟 修改為查詢特定病患的 observations 子集合
     _historyStream = FirebaseFirestore.instance
         .collection('patients')
         .doc(widget.patientDocId)
@@ -641,7 +604,7 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('${widget.patient.name} - 歷史紀錄', style: const TextStyle(fontSize: 18))),
+      appBar: AppBar(title: Text('${widget.patient.name} - 歷程時間軸', style: const TextStyle(fontSize: 18))),
       body: SafeArea(
         child: Center(
           child: Container(
@@ -669,17 +632,7 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                       if (!snapshot.hasData || snapshot.data!.docs.isEmpty) return const Center(child: Text('目前無歷史紀錄，請新增', style: TextStyle(color: Colors.grey, fontSize: 16)));
                      
                       var docs = snapshot.data!.docs;
-                      docs.sort((a, b) {
-                        final aMap = a.data() as Map<String, dynamic>;
-                        final bMap = b.data() as Map<String, dynamic>;
-                        final aTime = aMap['timestamp'];
-                        final bTime = bMap['timestamp'];
-                        if (aTime is Timestamp && bTime is Timestamp) {
-                          return bTime.compareTo(aTime);
-                        }
-                        return 0;
-                      });
-           
+                      
                       Set<String> sites = {'全部'};
                       for (var d in docs) {
                         String s = (d.data() as Map)['bodySite']?['text'] ?? '';
@@ -688,6 +641,25 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
            
                       var filteredDocs = docs;
                       if (_selectedSite != '全部') filteredDocs = docs.where((d) => ((d.data() as Map)['bodySite']?['text'] ?? '') == _selectedSite).toList();
+                      
+                      // 🌟 將紀錄依日期進行分組
+                      Map<String, List<DocumentSnapshot>> groupedByDate = {};
+                      for (var d in filteredDocs) {
+                        final data = d.data() as Map<String, dynamic>;
+                        String dateStr = '未知日期';
+                        if (data['effectiveDateTime'] != null) {
+                          DateTime dt = DateTime.parse(data['effectiveDateTime']).toLocal();
+                          dateStr = '${dt.year}-${dt.month.toString().padLeft(2,'0')}-${dt.day.toString().padLeft(2,'0')}';
+                        } else if (data['timestamp'] is Timestamp) {
+                          DateTime dt = (data['timestamp'] as Timestamp).toDate().toLocal();
+                          dateStr = '${dt.year}-${dt.month.toString().padLeft(2,'0')}-${dt.day.toString().padLeft(2,'0')}';
+                        }
+                        if (!groupedByDate.containsKey(dateStr)) groupedByDate[dateStr] = [];
+                        groupedByDate[dateStr]!.add(d);
+                      }
+                      
+                      // 日期由新到舊排序
+                      var sortedDates = groupedByDate.keys.toList()..sort((a, b) => b.compareTo(a));
            
                       return Column(
                         children: [
@@ -717,32 +689,60 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                                 : ListView.builder(
                                     physics: const AlwaysScrollableScrollPhysics(),
                                     padding: const EdgeInsets.only(left: 10, right: 10, top: 4, bottom: 100),
-                                    itemCount: filteredDocs.length,
-                                    itemBuilder: (c, i) => DualModalOverlayCard(
-                                      docId: filteredDocs[i].id, data: filteredDocs[i].data() as Map<String, dynamic>,
-                                      onDelete: () {
-                                        showDialog(
-                                          context: context,
-                                          builder: (ctx) => AlertDialog(
-                                            title: const Text('⚠️ 刪除紀錄', style: TextStyle(fontSize: 18)),
-                                            content: const Text('確定刪除紀錄？', style: TextStyle(fontSize: 15)),
-                                            actions: [
-                                              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-                                              ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () async { 
-                                                Navigator.pop(ctx); 
-                                                // 🌟 修改為刪除子集合內的文檔
-                                                await FirebaseFirestore.instance
-                                                    .collection('patients')
-                                                    .doc(widget.patientDocId)
-                                                    .collection('observations')
-                                                    .doc(filteredDocs[i].id)
-                                                    .delete(); 
-                                              }, child: const Text('刪除', style: TextStyle(color: Colors.white)))
-                                            ]
-                                          )
-                                        );
-                                      }
-                                    )
+                                    itemCount: sortedDates.length,
+                                    itemBuilder: (context, index) {
+                                      String dateKey = sortedDates[index];
+                                      var dayDocs = groupedByDate[dateKey]!;
+                                      // 同一天內，依據時間由新到舊排序
+                                      dayDocs.sort((a, b) {
+                                        String timeA = (a.data() as Map)['effectiveDateTime'] ?? '';
+                                        String timeB = (b.data() as Map)['effectiveDateTime'] ?? '';
+                                        return timeB.compareTo(timeA);
+                                      });
+                                      
+                                      return Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          // 日期標頭 (Time-Series 分組)
+                                          Padding(
+                                            padding: const EdgeInsets.only(top: 16, bottom: 12, left: 4),
+                                            child: Row(
+                                              children: [
+                                                const Icon(Icons.calendar_today, size: 16, color: Colors.blueAccent),
+                                                const SizedBox(width: 8),
+                                                Text(dateKey, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
+                                                const SizedBox(width: 12),
+                                                Expanded(child: Container(height: 1, color: Colors.blueAccent.withValues(alpha: 0.2)))
+                                              ],
+                                            ),
+                                          ),
+                                          ...dayDocs.map((doc) => DualModalOverlayCard(
+                                            docId: doc.id, data: doc.data() as Map<String, dynamic>,
+                                            onDelete: () {
+                                              showDialog(
+                                                context: context,
+                                                builder: (ctx) => AlertDialog(
+                                                  title: const Text('⚠️ 刪除紀錄', style: TextStyle(fontSize: 18)),
+                                                  content: const Text('確定刪除紀錄？', style: TextStyle(fontSize: 15)),
+                                                  actions: [
+                                                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+                                                    ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () async { 
+                                                      Navigator.pop(ctx); 
+                                                      await FirebaseFirestore.instance
+                                                          .collection('patients')
+                                                          .doc(widget.patientDocId)
+                                                          .collection('observations')
+                                                          .doc(doc.id)
+                                                          .delete(); 
+                                                    }, child: const Text('刪除', style: TextStyle(color: Colors.white)))
+                                                  ]
+                                                )
+                                              );
+                                            }
+                                          ))
+                                        ],
+                                      );
+                                    }
                                   ),
                           ),
                         ],
@@ -756,7 +756,6 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
         ),
       ),
       floatingActionButton: FloatingActionButton.extended(
-        // 🌟 將 patientDocId 傳遞至下一頁
         onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => BodyPartSelectionPage(patient: widget.patient, patientDocId: widget.patientDocId))),
         icon: const Icon(Icons.camera_alt, size: 20),
         label: const Text('新增紀錄', style: TextStyle(fontSize: 15)),
@@ -787,9 +786,23 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
   Offset _refPoint = const Offset(0.2, 0.8);  
   double _woundTemp = 38.2;
   double _referenceTemp = 35.8;
+  DateTime _selectedCaptureTime = DateTime.now(); // 🌟 新增：選擇時間
  
   final WoundFeatureData featureData = WoundFeatureData();
   
+  // 🌟 新增：時間選擇器對話框
+  Future<void> _pickDateTime() async {
+    final DateTime? date = await showDatePicker(context: context, initialDate: _selectedCaptureTime, firstDate: DateTime(2020), lastDate: DateTime.now());
+    if (date != null && mounted) {
+      final TimeOfDay? time = await showTimePicker(context: context, initialTime: TimeOfDay.fromDateTime(_selectedCaptureTime));
+      if (time != null) {
+        setState(() {
+          _selectedCaptureTime = DateTime(date.year, date.month, date.day, time.hour, time.minute);
+        });
+      }
+    }
+  }
+
   Future<void> _captureRGB() async {
     try {
       final photo = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 60, maxWidth: 600, maxHeight: 600);
@@ -893,6 +906,26 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
       return Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
+          // 🌟 時間選擇區塊 (方便事後補登)
+          Container(
+            margin: const EdgeInsets.only(bottom: 20), padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+            decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.05), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white12)),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('實際拍攝時間 (支援回溯補登)', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                    const SizedBox(height: 4),
+                    Text('${_selectedCaptureTime.year}-${_selectedCaptureTime.month.toString().padLeft(2,'0')}-${_selectedCaptureTime.day.toString().padLeft(2,'0')} ${_selectedCaptureTime.hour.toString().padLeft(2,'0')}:${_selectedCaptureTime.minute.toString().padLeft(2,'0')}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.blueAccent)),
+                  ],
+                ),
+                TextButton.icon(onPressed: _pickDateTime, icon: const Icon(Icons.edit, size: 16), label: const Text('修改'))
+              ],
+            ),
+          ),
+
           const Text('請拍攝傷口 RGB 光學影像', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           const Text('提示：移除敷料，保持鏡頭垂直傷口', style: TextStyle(color: Colors.grey, fontSize: 13)),
@@ -1056,6 +1089,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
                       features: featureData,
                       woundTemp: _woundTemp,
                       referenceTemp: _referenceTemp,
+                      captureTime: _selectedCaptureTime, // 🌟 帶入拍攝時間
                     );
                     Navigator.pop(context, record);
                   },
@@ -1077,7 +1111,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
 // =======================================================
 class BodyPartSelectionPage extends StatefulWidget {
   final Patient patient;
-  final String patientDocId; // 🌟 接收 Document ID
+  final String patientDocId; 
   const BodyPartSelectionPage({super.key, required this.patient, required this.patientDocId});
   @override State<BodyPartSelectionPage> createState() => _BodyPartSelectionPageState();
 }
@@ -1089,7 +1123,6 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
   @override 
   void initState() {
     super.initState();
-    // 🌟 修改為查詢特定病患的 observations 子集合
     _woundsStream = FirebaseFirestore.instance
         .collection('patients')
         .doc(widget.patientDocId)
@@ -1097,14 +1130,12 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
         .snapshots();
   }
   
-  // 🚀 功能：打包為純文字 JSON 並一鍵複製 (不需安裝其他套件，完美相容網頁版)
   void _exportFHIRJson() {
     if (_capturedWounds.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('⚠️ 尚未拍攝任何部位影像', style: TextStyle(fontSize: 15)), backgroundColor: Colors.orange));
       return;
     }
     
-    // 收集所有拍攝的傷口，轉換成標準 FHIR 格式的 List
     List<Map<String, dynamic>> fhirBundle = [];
     for (var entry in _capturedWounds.entries) {
       String partName = entry.key;
@@ -1119,13 +1150,12 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
         thermalBase64: base64Encode(record.thermalBytes),
         woundTemp: record.woundTemp,
         referenceTemp: record.referenceTemp,
+        captureTime: record.captureTime, // 🌟 FHIR 綁定自訂拍攝時間
       );
       fhirBundle.add(fhirObservation.toFhirJson());
     }
-    // 將 List 排版並轉換成漂亮的 JSON 字串
     JsonEncoder encoder = const JsonEncoder.withIndent('  ');
     String jsonString = encoder.convert(fhirBundle);
-    // 彈出對話框讓你複製
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -1145,7 +1175,7 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('關閉', style: TextStyle(color: Colors.grey))),
           ElevatedButton.icon(
             onPressed: () async {
-              await Clipboard.setData(ClipboardData(text: jsonString)); // 複製到剪貼簿
+              await Clipboard.setData(ClipboardData(text: jsonString));
               if (context.mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ JSON 已複製到剪貼簿！可直接貼上存檔', style: TextStyle(fontSize: 14)), backgroundColor: Colors.green));
                 Navigator.pop(context);
@@ -1181,11 +1211,11 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
           thermalBase64: base64Encode(record.thermalBytes),
           woundTemp: record.woundTemp,
           referenceTemp: record.referenceTemp,
+          captureTime: record.captureTime, // 🌟 FHIR 綁定自訂拍攝時間
         );
         Map<String, dynamic> finalJson = fhirObservation.toFhirJson();
-        finalJson['timestamp'] = FieldValue.serverTimestamp();
+        finalJson['timestamp'] = FieldValue.serverTimestamp(); // 雙軌時間戳：稽核用
         
-        // 🌟 修改為寫入特定病患的 observations 子集合
         await firestore
             .collection('patients')
             .doc(widget.patientDocId)
@@ -1240,8 +1270,24 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
     _point(context, 0.45, 0.87, '左側足趾 (L Toes)', existing),
   ];
   
+  // 🌟 動態狀態點位更新：紅(未拍)、黃(歷史有紀錄，代表需持續追蹤)、綠(本次已拍)
   Widget _point(BuildContext context, double xPercent, double yPercent, String name, Set<String> existing) {
-    bool isTaken = _capturedWounds.containsKey(name) || existing.contains(name);
+    bool isJustCaptured = _capturedWounds.containsKey(name);
+    bool isHistoricallyRecorded = existing.contains(name);
+    
+    Color dotColor;
+    IconData dotIcon;
+    
+    if (isJustCaptured) {
+      dotColor = Colors.greenAccent.withValues(alpha: 0.9);
+      dotIcon = Icons.check;
+    } else if (isHistoricallyRecorded) {
+      dotColor = Colors.amberAccent.withValues(alpha: 0.9); // 歷史傷口，提示要追蹤
+      dotIcon = Icons.history;
+    } else {
+      dotColor = Colors.redAccent.withValues(alpha: 0.85); // 新傷口
+      dotIcon = Icons.add;
+    }
    
     return Align(
       alignment: Alignment(
@@ -1250,26 +1296,24 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       ),
       child: GestureDetector(
         onTap: () async {
-          if (isTaken) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('⚠️ 已有紀錄，請至歷史紀錄刪除重拍。', style: TextStyle(fontSize: 14))));
+          if (isJustCaptured) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 已在本次暫存清單中，若需重拍請先上傳後再新增', style: TextStyle(fontSize: 14))));
           } else {
             final WoundPhotoRecord? result = await Navigator.push(context, MaterialPageRoute(builder: (context) => WoundCaptureWizardPage(partName: name)));
             if (result != null) {
               setState(() { _capturedWounds[name] = result; });
-              if (mounted) ScaffoldMessenger.of(R).showSnackBar(const SnackBar(content: Text('✅ 評估已暫存，請繼續標記或點擊上傳', style: TextStyle(fontSize: 14)), backgroundColor: Colors.green));
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 評估已暫存，請繼續標記或點擊上傳', style: TextStyle(fontSize: 14)), backgroundColor: Colors.green));
             }
           }
         },
         child: Container(
-          width: 36, 
-          height: 36,
+          width: 36, height: 36,
           decoration: BoxDecoration(
-            color: isTaken ? Colors.greenAccent.withValues(alpha: 0.9) : Colors.redAccent.withValues(alpha: 0.85), 
-            shape: BoxShape.circle, 
+            color: dotColor, shape: BoxShape.circle, 
             border: Border.all(color: Colors.white, width: 2),
             boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 4)]
           ), 
-          child: Icon(isTaken ? Icons.check : Icons.add, size: 20, color: Colors.white)
+          child: Icon(dotIcon, size: 20, color: Colors.white)
         ),
       ),
     );
@@ -1307,7 +1351,10 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
                       _viewButton('正面觀', Icons.person, false)
                     ]
                   ),
-                  const Padding(padding: EdgeInsets.symmetric(vertical: 12), child: Text('點選圖上位置進行拍攝：', style: TextStyle(color: Colors.grey, fontSize: 14))),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12), 
+                    child: Text('🔴 未拍攝   🟡 歷史需追蹤   🟢 本次已拍攝', style: TextStyle(color: Colors.white70, fontSize: 13))
+                  ),
                  
                   LayoutBuilder(
                     builder: (context, constraints) {
