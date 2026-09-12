@@ -48,6 +48,7 @@ class WoundCareApp extends StatelessWidget {
 abstract class ThermalCameraService {
   Future<Map<String, dynamic>?> captureThermalData();
 }
+
 class MockThermalCamera implements ThermalCameraService {
   final ImagePicker _picker = ImagePicker();
   @override
@@ -62,6 +63,7 @@ class MockThermalCamera implements ThermalCameraService {
     };
   }
 }
+
 class NativeFlirCamera implements ThermalCameraService {
   static const platform = MethodChannel('com.woundcare.app/thermal_channel');
   @override
@@ -115,7 +117,6 @@ class WoundPhotoRecord {
   });
 }
 
-// 🌟 升級版：符合 HL7 FHIR R4 + LOINC 國際醫學代碼的資料模型
 class FhirWoundObservation {
   final Patient subject;
   final String bodySite;
@@ -125,7 +126,6 @@ class FhirWoundObservation {
   final String thermalBase64;
   final double woundTemp;
   final double referenceTemp;
-
   FhirWoundObservation({
     required this.subject,
     required this.bodySite,
@@ -136,11 +136,9 @@ class FhirWoundObservation {
     required this.woundTemp,
     required this.referenceTemp,
   });
-
   Map<String, dynamic> toFhirJson() {
     double deltaT = woundTemp - referenceTemp;
     String nowIso = DateTime.now().toUtc().toIso8601String();
-
     return {
       "resourceType": "Observation",
       "status": "final",
@@ -215,6 +213,7 @@ class _PatientListPageState extends State<PatientListPage> {
   late Stream<QuerySnapshot> _patientsStream;
   String _searchQuery = '';
   @override void initState() { super.initState(); _patientsStream = FirebaseFirestore.instance.collection('patients').snapshots(); }
+  
   void _showAddPatientDialog() {
     final bedController = TextEditingController(); final nameController = TextEditingController(); final idController = TextEditingController(); final ageController = TextEditingController(); final scoreController = TextEditingController(); String selectedGender = '男';
     showDialog(context: context, builder: (context) => StatefulBuilder(builder: (context, setDialogState) => AlertDialog(
@@ -245,13 +244,17 @@ class _PatientListPageState extends State<PatientListPage> {
   void _confirmDeletePatient(String docId, String patientName) {
     showDialog(context: context, builder: (context) => AlertDialog(
       title: const Text('⚠️ 刪除病患', style: TextStyle(fontSize: 18)),
-      content: Text('確定刪除「$patientName」？', style: const TextStyle(fontSize: 15)),
+      content: Text('確定刪除「$patientName」？\n(注意：Firestore 預設不會刪除底下的歷史紀錄)', style: const TextStyle(fontSize: 15)),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () async { Navigator.pop(context); await FirebaseFirestore.instance.collection('patients').doc(docId).delete(); }, child: const Text('刪除', style: TextStyle(color: Colors.white)))
+        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () async { 
+          Navigator.pop(context); 
+          await FirebaseFirestore.instance.collection('patients').doc(docId).delete(); 
+        }, child: const Text('刪除', style: TextStyle(color: Colors.white)))
       ],
     ));
   }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -310,7 +313,8 @@ class _PatientListPageState extends State<PatientListPage> {
                         side: BorderSide(color: p.bradenScore <= 12 ? Colors.redAccent.withValues(alpha: 0.6) : Colors.transparent, width: 1.5)
                       ),
                       child: InkWell(
-                        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => PatientHistoryPage(patient: p))),
+                        // 🌟 修改處：同時傳遞 patient 與 patientDocId
+                        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => PatientHistoryPage(patient: p, patientDocId: docId))),
                         borderRadius: BorderRadius.circular(14),
                         child: Padding(
                           padding: const EdgeInsets.all(12),
@@ -404,6 +408,7 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
   String? _rgbUrl;
   String? _thermalUrl;
   bool _isParsing = true;
+  
   @override
   void initState() {
     super.initState();
@@ -485,6 +490,7 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
     }
     return const Center(child: Icon(Icons.broken_image, color: Colors.grey, size: 36));
   }
+  
   @override
   Widget build(BuildContext context) {
     List<dynamic> comps = widget.data['component'] ?? [];
@@ -511,6 +517,7 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
         alertText = '❄️ 缺血壞死 (ΔT $deltaT°C)';
       }
     }
+    
     return Card(
       elevation: 4, margin: const EdgeInsets.only(bottom: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       child: Padding(
@@ -613,16 +620,24 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
 // =======================================================
 class PatientHistoryPage extends StatefulWidget {
   final Patient patient;
-  const PatientHistoryPage({super.key, required this.patient});
+  final String patientDocId; // 🌟 接收 Document ID
+  const PatientHistoryPage({super.key, required this.patient, required this.patientDocId});
   @override State<PatientHistoryPage> createState() => _PatientHistoryPageState();
 }
 class _PatientHistoryPageState extends State<PatientHistoryPage> {
   late Stream<QuerySnapshot> _historyStream;
   String _selectedSite = '全部';
+  
   @override void initState() {
     super.initState();
-    _historyStream = FirebaseFirestore.instance.collection('observations').where('subject.reference', isEqualTo: 'Patient/${widget.patient.id}').snapshots();
+    // 🌟 修改為查詢特定病患的 observations 子集合
+    _historyStream = FirebaseFirestore.instance
+        .collection('patients')
+        .doc(widget.patientDocId)
+        .collection('observations')
+        .snapshots();
   }
+  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -713,7 +728,16 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                                             content: const Text('確定刪除紀錄？', style: TextStyle(fontSize: 15)),
                                             actions: [
                                               TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-                                              ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () async { Navigator.pop(ctx); await FirebaseFirestore.instance.collection('observations').doc(filteredDocs[i].id).delete(); }, child: const Text('刪除', style: TextStyle(color: Colors.white)))
+                                              ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () async { 
+                                                Navigator.pop(ctx); 
+                                                // 🌟 修改為刪除子集合內的文檔
+                                                await FirebaseFirestore.instance
+                                                    .collection('patients')
+                                                    .doc(widget.patientDocId)
+                                                    .collection('observations')
+                                                    .doc(filteredDocs[i].id)
+                                                    .delete(); 
+                                              }, child: const Text('刪除', style: TextStyle(color: Colors.white)))
                                             ]
                                           )
                                         );
@@ -732,7 +756,8 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
         ),
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => BodyPartSelectionPage(patient: widget.patient))),
+        // 🌟 將 patientDocId 傳遞至下一頁
+        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => BodyPartSelectionPage(patient: widget.patient, patientDocId: widget.patientDocId))),
         icon: const Icon(Icons.camera_alt, size: 20),
         label: const Text('新增紀錄', style: TextStyle(fontSize: 15)),
         backgroundColor: Colors.blueAccent,
@@ -764,6 +789,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
   double _referenceTemp = 35.8;
  
   final WoundFeatureData featureData = WoundFeatureData();
+  
   Future<void> _captureRGB() async {
     try {
       final photo = await _picker.pickImage(source: ImageSource.gallery, imageQuality: 60, maxWidth: 600, maxHeight: 600);
@@ -822,6 +848,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
       ),
     );
   }
+  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -854,11 +881,13 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
       ),
     );
   }
+  
   Widget _buildStepIcon(int stepIndex, IconData icon, String label) {
     bool isActive = _currentStep == stepIndex; bool isPast = _currentStep > stepIndex;
     Color color = isActive ? Colors.blueAccent : (isPast ? Colors.green : Colors.grey);
     return Column(children: [CircleAvatar(backgroundColor: color.withValues(alpha: 0.2), radius: 20, child: Icon(icon, color: color, size: 20)), const SizedBox(height: 4), Text(label, style: TextStyle(color: color, fontWeight: isActive ? FontWeight.bold : FontWeight.normal, fontSize: 12))]);
   }
+  
   Widget _buildCurrentStepContent() {
     if (_currentStep == 0) {
       return Column(
@@ -1048,20 +1077,26 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
 // =======================================================
 class BodyPartSelectionPage extends StatefulWidget {
   final Patient patient;
-  const BodyPartSelectionPage({super.key, required this.patient});
+  final String patientDocId; // 🌟 接收 Document ID
+  const BodyPartSelectionPage({super.key, required this.patient, required this.patientDocId});
   @override State<BodyPartSelectionPage> createState() => _BodyPartSelectionPageState();
 }
 class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
   bool isBackView = true;
   final Map<String, WoundPhotoRecord> _capturedWounds = {};
   late Stream<QuerySnapshot> _woundsStream;
-
+  
   @override 
   void initState() {
     super.initState();
-    _woundsStream = FirebaseFirestore.instance.collection('observations').where('subject.reference', isEqualTo: 'Patient/${widget.patient.id}').snapshots();
+    // 🌟 修改為查詢特定病患的 observations 子集合
+    _woundsStream = FirebaseFirestore.instance
+        .collection('patients')
+        .doc(widget.patientDocId)
+        .collection('observations')
+        .snapshots();
   }
-
+  
   // 🚀 功能：打包為純文字 JSON 並一鍵複製 (不需安裝其他套件，完美相容網頁版)
   void _exportFHIRJson() {
     if (_capturedWounds.isEmpty) {
@@ -1087,11 +1122,9 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       );
       fhirBundle.add(fhirObservation.toFhirJson());
     }
-
     // 將 List 排版並轉換成漂亮的 JSON 字串
     JsonEncoder encoder = const JsonEncoder.withIndent('  ');
     String jsonString = encoder.convert(fhirBundle);
-
     // 彈出對話框讓你複製
     showDialog(
       context: context,
@@ -1126,7 +1159,7 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       )
     );
   }
-
+  
   Future<void> _uploadAllToHospitalSystem() async {
     if (_capturedWounds.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('⚠️ 尚未拍攝任何部位影像', style: TextStyle(fontSize: 15)), backgroundColor: Colors.orange));
@@ -1151,7 +1184,14 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
         );
         Map<String, dynamic> finalJson = fhirObservation.toFhirJson();
         finalJson['timestamp'] = FieldValue.serverTimestamp();
-        await firestore.collection('observations').add(finalJson).timeout(const Duration(seconds: 10));
+        
+        // 🌟 修改為寫入特定病患的 observations 子集合
+        await firestore
+            .collection('patients')
+            .doc(widget.patientDocId)
+            .collection('observations')
+            .add(finalJson)
+            .timeout(const Duration(seconds: 10));
       }
       if (!mounted) return;
       Navigator.pop(context); Navigator.pop(context);
@@ -1160,7 +1200,7 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       if (!mounted) return; Navigator.pop(context); ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('上傳失敗: $e'), backgroundColor: Colors.redAccent));
     }
   }
-
+  
   Widget _viewButton(String label, IconData icon, bool viewState) => ElevatedButton.icon(
     onPressed: () => setState(() => isBackView = viewState), 
     icon: Icon(icon, size: 18), 
@@ -1171,8 +1211,7 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8)
     )
   );
-
-  // 🌟 1. 建立背部紅點 (依據截圖精準無邊界覆蓋版)
+  
   List<Widget> _buildBackDots(BuildContext context, Set<String> existing) => [
     _point(context, 0.73, 0.12, '後腦勺 (Back of Head)', existing),
     _point(context, 0.58, 0.23, '左側肩胛骨 (L Shoulder Blade)', existing), 
@@ -1186,8 +1225,7 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
     _point(context, 0.68, 0.89, '左側足跟 (L Heel)', existing),
     _point(context, 0.78, 0.89, '右側足跟 (R Heel)', existing),
   ];
-
-  // 🌟 2. 建立正面紅點 (精準覆蓋版)
+  
   List<Widget> _buildFrontDots(BuildContext context, Set<String> existing) => [
     _point(context, 0.30, 0.16, '右側耳部 (R Ear)', existing), 
     _point(context, 0.47, 0.16, '左側耳部 (L Ear)', existing),
@@ -1201,7 +1239,7 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
     _point(context, 0.33, 0.87, '右側足趾 (R Toes)', existing),
     _point(context, 0.45, 0.87, '左側足趾 (L Toes)', existing),
   ];
-
+  
   Widget _point(BuildContext context, double xPercent, double yPercent, String name, Set<String> existing) {
     bool isTaken = _capturedWounds.containsKey(name) || existing.contains(name);
    
@@ -1218,7 +1256,7 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
             final WoundPhotoRecord? result = await Navigator.push(context, MaterialPageRoute(builder: (context) => WoundCaptureWizardPage(partName: name)));
             if (result != null) {
               setState(() { _capturedWounds[name] = result; });
-              if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 評估已暫存，請繼續標記或點擊上傳', style: TextStyle(fontSize: 14)), backgroundColor: Colors.green));
+              if (mounted) ScaffoldMessenger.of(R).showSnackBar(const SnackBar(content: Text('✅ 評估已暫存，請繼續標記或點擊上傳', style: TextStyle(fontSize: 14)), backgroundColor: Colors.green));
             }
           }
         },
@@ -1236,7 +1274,7 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       ),
     );
   }
-
+  
   @override
   Widget build(BuildContext context) {
     bool isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
@@ -1275,17 +1313,13 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
                     builder: (context, constraints) {
                       double maxWidth = constraints.maxWidth;
                       double containerWidth;
-
-                      // 🌟 電腦版/平板動態放大判斷
                       if (maxWidth > 600) {
                         double screenHeight = MediaQuery.of(context).size.height;
                         double targetHeight = screenHeight * 0.65; 
                         containerWidth = targetHeight * (350 / 600); 
                       } else {
-                        // 📱 手機版維持不變
                         containerWidth = isLandscape ? 180 : (maxWidth > 380 ? 380 : maxWidth * 0.92);
                       }
-
                       double containerHeight = containerWidth * (600 / 350);
                      
                       return Center(
@@ -1293,7 +1327,6 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
                           width: containerWidth, height: containerHeight, decoration: BoxDecoration(color: const Color(0xFF1E1E1E), border: Border.all(color: Colors.grey.shade800), borderRadius: BorderRadius.circular(16)),
                           child: Stack(
                             alignment: Alignment.center,
-                            // 🌟 超出範圍的點位也不會被裁切掉 (Clip.none)
                             clipBehavior: Clip.none,
                             children: [
                               ClipRRect(borderRadius: BorderRadius.circular(16), child: Image.asset(isBackView ? 'assets/images/body_back.png.jpg' : 'assets/images/body_front.png.jpg', width: containerWidth, height: containerHeight, fit: BoxFit.fill, errorBuilder: (c,e,s) => const Center(child: Text("找不到圖片")))),
@@ -1313,7 +1346,6 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
           }
         ),
       ),
-      // 🌟 新增的兩顆浮動按鈕：上傳 與 匯出 JSON
       floatingActionButton: Column(
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
