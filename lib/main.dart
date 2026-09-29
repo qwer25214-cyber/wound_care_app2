@@ -43,10 +43,8 @@ class WoundCareApp extends StatelessWidget {
 }
 
 // =======================================================
-// === 1. 硬體感測器介接架構 (Task 2 & Task 3) ===
+// === 1. 熱像儀硬體介接架構 ===
 // =======================================================
-
-// --- FLIR 熱像儀抽象層 ---
 abstract class ThermalCameraService {
   Future<Map<String, dynamic>?> captureThermalData();
 }
@@ -66,47 +64,23 @@ class MockThermalCamera implements ThermalCameraService {
   }
 }
 
-// --- Google Pixel 溫度感測器抽象層 ---
-abstract class TemperatureSensorService {
-  Future<FhirTemperatureObservation?> captureTemperature({
-    required Patient patient,
-    required String bodySite,
-    required DateTime captureTime,
-  });
-}
-
-class MockTemperatureSensor implements TemperatureSensorService {
+class NativeFlirCamera implements ThermalCameraService {
+  static const platform = MethodChannel('com.woundcare.app/thermal_channel');
   @override
-  Future<FhirTemperatureObservation?> captureTemperature({
-    required Patient patient,
-    required String bodySite,
-    required DateTime captureTime,
-  }) async {
-    // 模擬硬體感測延遲
-    await Future.delayed(const Duration(milliseconds: 600));
-    // 產生 36.0 ~ 38.0 的模擬溫度
-    double randomTemp = 36.0 + (DateTime.now().millisecondsSinceEpoch % 20) / 10.0;
-    
-    return FhirTemperatureObservation(
-      subject: patient,
-      temperature: double.parse(randomTemp.toStringAsFixed(1)),
-      bodySite: bodySite,
-      captureTime: captureTime,
-    );
+  Future<Map<String, dynamic>?> captureThermalData() async {
+    try {
+      final Map<dynamic, dynamic> result = await platform.invokeMethod('startFlirCamera');
+      return {
+        'imageBytes': result['imageBytes'] as Uint8List,
+        'woundTemp': result['woundTemp'] as double,
+        'referenceTemp': result['referenceTemp'] as double,
+      };
+    } catch (e) {
+      debugPrint("呼叫真實熱像儀失敗: $e");
+      return null;
+    }
   }
 }
-
-// 🌟 Task 4: Dependency Injection (Service Locator)
-class SensorServiceLocator {
-  static final SensorServiceLocator _instance = SensorServiceLocator._internal();
-  factory SensorServiceLocator() => _instance;
-  SensorServiceLocator._internal();
-
-  final ThermalCameraService thermalCamera = MockThermalCamera();
-  final TemperatureSensorService temperatureSensor = MockTemperatureSensor();
-}
-// 全域 DI 容器實例
-final sensorLocator = SensorServiceLocator();
 
 // =======================================================
 // === 2. 核心資料模型 (符合國際 HL7 FHIR R4 格式) ===
@@ -133,94 +107,107 @@ class WoundPhotoRecord {
   final WoundFeatureData features;
   final double woundTemp;
   final double referenceTemp;
-  final DateTime captureTime;
+  final DateTime captureTime; // 🌟 支援自訂實際拍攝時間
   double get deltaT => woundTemp - referenceTemp;
+  
   WoundPhotoRecord({
-    required this.rgbBytes, required this.thermalBytes, required this.features,
-    required this.woundTemp, required this.referenceTemp, required this.captureTime,
+    required this.rgbBytes,
+    required this.thermalBytes,
+    required this.features,
+    required this.woundTemp,
+    required this.referenceTemp,
+    required this.captureTime,
   });
 }
 
-// 🌟 Task 1: FHIR R4 Media 資源 (處理影像)
-class FhirMedia {
-  final Patient subject;
-  final String base64Data;
-  final String contentType;
-  final String title;
-  final String bodySite;
-  final DateTime captureTime;
-
-  FhirMedia({
-    required this.subject, required this.base64Data, this.contentType = 'image/jpeg',
-    required this.title, required this.bodySite, required this.captureTime,
-  });
-
-  Map<String, dynamic> toJson() => {
-    "resourceType": "Media",
-    "status": "completed",
-    "subject": {"reference": "Patient/${subject.id}", "display": subject.name},
-    "createdDateTime": captureTime.toUtc().toIso8601String(),
-    "bodySite": {"text": bodySite},
-    "content": {"contentType": contentType, "data": base64Data, "title": title}
-  };
-}
-
-// 🌟 Task 1: FHIR R4 獨立體溫資源 (LOINC 8310-5)
-class FhirTemperatureObservation {
-  final Patient subject;
-  final double temperature;
-  final String bodySite;
-  final DateTime captureTime;
-
-  FhirTemperatureObservation({
-    required this.subject, required this.temperature, required this.bodySite, required this.captureTime,
-  });
-
-  Map<String, dynamic> toJson() => {
-    "resourceType": "Observation",
-    "status": "final",
-    "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"}]}],
-    "code": {"coding": [{"system": "http://loinc.org", "code": "8310-5", "display": "Body temperature"}]},
-    "subject": {"reference": "Patient/${subject.id}", "display": subject.name},
-    "effectiveDateTime": captureTime.toUtc().toIso8601String(),
-    "bodySite": {"text": bodySite},
-    "valueQuantity": {"value": temperature, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
-  };
-}
-
-// 🌟 Task 1: 重構 FHIR R4 傷口評估資源 (移除圖檔，保留評估數據與溫差推算)
+// 🌟 升級版：符合 HL7 FHIR R4 + LOINC 國際醫學代碼的資料模型
 class FhirWoundObservation {
   final Patient subject;
   final String bodySite;
   final double bradenScore;
   final WoundFeatureData features;
+  final String rgbBase64;
+  final String thermalBase64;
   final double woundTemp;
   final double referenceTemp;
-  final DateTime captureTime;
+  final DateTime captureTime; // 🌟 新增
 
   FhirWoundObservation({
-    required this.subject, required this.bodySite, required this.bradenScore,
-    required this.features, required this.woundTemp, required this.referenceTemp, required this.captureTime,
+    required this.subject,
+    required this.bodySite,
+    required this.bradenScore,
+    required this.features,
+    required this.rgbBase64,
+    required this.thermalBase64,
+    required this.woundTemp,
+    required this.referenceTemp,
+    required this.captureTime,
   });
-
-  Map<String, dynamic> toJson() {
+  
+  Map<String, dynamic> toFhirJson() {
     double deltaT = woundTemp - referenceTemp;
-    String recordIso = captureTime.toUtc().toIso8601String();
-    
+    String recordIso = captureTime.toUtc().toIso8601String(); // 🌟 綁定臨床實際時間
     return {
       "resourceType": "Observation",
       "status": "final",
-      "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "exam", "display": "Exam"}]}],
-      "code": {"coding": [{"system": "http://loinc.org", "code": "39126-8", "display": "Wound assessment panel"}], "text": "熱影像傷口評估報告"},
-      "subject": {"reference": "Patient/${subject.id}", "display": subject.name},
-      "effectiveDateTime": recordIso,
-      "bodySite": {"text": bodySite},
+      "category": [
+        {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+              "code": "exam",
+              "display": "Exam"
+            }
+          ]
+        }
+      ],
+      "code": {
+        "coding": [
+          {"system": "http://loinc.org", "code": "39126-8", "display": "Wound assessment panel"} 
+        ],
+        "text": "熱影像傷口評估報告"
+      },
+      "subject": {
+        "reference": "Patient/${subject.id}",
+        "display": subject.name
+      },
+      "effectiveDateTime": recordIso, // 🌟 寫入設定的時間
+      "bodySite": {
+        "text": bodySite 
+      },
       "component": [
-        {"code": {"coding": [{"system": "http://loinc.org", "code": "38228-3", "display": "Braden scale total score"}]}, "valueQuantity": {"value": bradenScore, "system": "http://unitsofmeasure.org", "code": "{score}"}},
-        {"code": {"coding": [{"system": "http://loinc.org", "code": "72290-0", "display": "Exudate amount"}]}, "valueCodeableConcept": {"text": features.exudateAmount}},
-        {"code": {"coding": [{"system": "http://loinc.org", "code": "72289-2", "display": "Tissue type in wound bed"}]}, "valueCodeableConcept": {"text": features.tissueType}},
-        {"code": {"text": "Periwound Reference Temperature"}, "valueQuantity": {"value": referenceTemp, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}},
-        {"code": {"text": "Temperature Difference (Delta T)"}, "valueQuantity": {"value": double.parse(deltaT.toStringAsFixed(1)), "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}}
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "38228-3", "display": "Braden scale total score"}]},
+          "valueQuantity": {"value": bradenScore, "system": "http://unitsofmeasure.org", "code": "{score}"}
+        },
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "72290-0", "display": "Exudate amount"}]},
+          "valueCodeableConcept": {"text": features.exudateAmount} 
+        },
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "72289-2", "display": "Tissue type in wound bed"}]},
+          "valueCodeableConcept": {"text": features.tissueType}
+        },
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "72728-9", "display": "Wound image"}]},
+          "valueAttachment": {"contentType": "image/jpeg", "data": rgbBase64, "title": "RGB Optical Image"}
+        },
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "72728-9", "display": "Thermal Image"}]},
+          "valueAttachment": {"contentType": "image/jpeg", "data": thermalBase64, "title": "Thermal Infrared Image"}
+        },
+        {
+          "code": {"coding": [{"system": "http://loinc.org", "code": "8310-5", "display": "Body temperature"}]},
+          "valueQuantity": {"value": woundTemp, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
+        },
+        {
+          "code": {"text": "Periwound Reference Temperature"},
+          "valueQuantity": {"value": referenceTemp, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
+        },
+        {
+          "code": {"text": "Temperature Difference (Delta T)"},
+          "valueQuantity": {"value": double.parse(deltaT.toStringAsFixed(1)), "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
+        }
       ]
     };
   }
@@ -265,13 +252,10 @@ class _PatientListPageState extends State<PatientListPage> {
   void _confirmDeletePatient(String docId, String patientName) {
     showDialog(context: context, builder: (context) => AlertDialog(
       title: const Text('⚠️ 刪除病患', style: TextStyle(fontSize: 18)),
-      content: Text('確定刪除「$patientName」？\n(注意：Firestore 預設不會刪除底下的歷史紀錄)', style: const TextStyle(fontSize: 15)),
+      content: Text('確定刪除「$patientName」？', style: const TextStyle(fontSize: 15)),
       actions: [
         TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () async { 
-          Navigator.pop(context); 
-          await FirebaseFirestore.instance.collection('patients').doc(docId).delete(); 
-        }, child: const Text('刪除', style: TextStyle(color: Colors.white)))
+        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () async { Navigator.pop(context); await FirebaseFirestore.instance.collection('patients').doc(docId).delete(); }, child: const Text('刪除', style: TextStyle(color: Colors.white)))
       ],
     ));
   }
@@ -334,7 +318,7 @@ class _PatientListPageState extends State<PatientListPage> {
                         side: BorderSide(color: p.bradenScore <= 12 ? Colors.redAccent.withValues(alpha: 0.6) : Colors.transparent, width: 1.5)
                       ),
                       child: InkWell(
-                        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => PatientHistoryPage(patient: p, patientDocId: docId))),
+                        onTap: () => Navigator.push(context, MaterialPageRoute(builder: (context) => PatientHistoryPage(patient: p))),
                         borderRadius: BorderRadius.circular(14),
                         child: Padding(
                           padding: const EdgeInsets.all(12),
@@ -434,6 +418,7 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
     super.initState();
     _parseImagesAsync();
   }
+  
   @override
   void didUpdateWidget(covariant DualModalOverlayCard oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -441,35 +426,18 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
       _parseImagesAsync();
     }
   }
-
-  String _extractMediaFromBundle(List<dynamic> entries, String title) {
-    for(var e in entries) {
-      if(e['resource'] != null && e['resource']['resourceType'] == 'Media' && e['resource']['content'] != null && e['resource']['content']['title'] == title) {
-        return e['resource']['content']['data'] ?? '';
-      }
-    }
-    return '';
-  }
-
+  
   Future<void> _parseImagesAsync() async {
     setState(() => _isParsing = true);
     await Future.delayed(const Duration(milliseconds: 50));
     if (!mounted) return;
     try {
-      String rgbBase64 = '';
-      String thermalBase64 = '';
-      
-      bool isBundle = widget.data['resourceType'] == 'Bundle';
-      if (isBundle) {
-        List<dynamic> entries = widget.data['entry'] ?? [];
-        rgbBase64 = _extractMediaFromBundle(entries, 'RGB Optical Image');
-        thermalBase64 = _extractMediaFromBundle(entries, 'Thermal Infrared Image');
-      } else {
-        List<dynamic> comps = widget.data['component'] ?? [];
-        rgbBase64 = _extractValLegacy(comps, 'RGB Optical Image', 'Wound image');
-        thermalBase64 = _extractValLegacy(comps, 'Thermal Infrared Image', 'Thermal Image');
-      }
-
+      List<dynamic> comps = widget.data['component'] ?? [];
+      String rgbBase64 = _extractVal(comps, 'RGB Optical Image', 'Wound image');
+      if (rgbBase64.isEmpty && widget.data['media'] != null) rgbBase64 = widget.data['media']['rgb_url'] ?? '';
+     
+      String thermalBase64 = _extractVal(comps, 'Thermal Infrared Image', 'Thermal Image');
+      if (thermalBase64.isEmpty && widget.data['media'] != null) thermalBase64 = widget.data['media']['thermal_url'] ?? '';
       _rgbUrl = _convertToSafeDataUri(rgbBase64);
       _thermalUrl = _convertToSafeDataUri(thermalBase64);
     } catch (e) {
@@ -478,7 +446,7 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
       if (mounted) setState(() => _isParsing = false);
     }
   }
-
+  
   String? _convertToSafeDataUri(String? dataString) {
     if (dataString == null || dataString.trim().isEmpty) return null;
     String cleanString = dataString.replaceAll('\n', '').replaceAll('\r', '').replaceAll(' ', '');
@@ -490,6 +458,7 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
     return 'data:image/jpeg;base64,$cleanString';
   }
   
+  // 🌟 使用 FHIR 的 effectiveDateTime 或 fallback 到 timestamp
   String _formatDateSafe(Map<String, dynamic> data) {
     if (data['effectiveDateTime'] != null) {
       try {
@@ -505,36 +474,8 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
     }
     return t.toString();
   }
-
-  String _extractBundleComponent(List<dynamic> entries, String code, {bool isText = false}) {
-    for(var e in entries) {
-      if(e['resource'] != null && e['resource']['resourceType'] == 'Observation' && e['resource']['code']?['coding']?[0]?['code'] == '39126-8') {
-         List<dynamic> comps = e['resource']['component'] ?? [];
-         for(var c in comps) {
-           if (isText) {
-             if(c['code']?['text'] == code) return c['valueQuantity']?['value']?.toString() ?? '';
-           } else {
-             if(c['code']?['coding']?[0]?['code'] == code) {
-                if (c['valueCodeableConcept'] != null) return c['valueCodeableConcept']['text'] ?? '';
-                if (c['valueQuantity'] != null) return c['valueQuantity']['value']?.toString() ?? '';
-             }
-           }
-         }
-      }
-    }
-    return '';
-  }
-
-  String _extractVitalSignFromBundle(List<dynamic> entries, String loinc) {
-    for(var e in entries) {
-       if(e['resource'] != null && e['resource']['resourceType'] == 'Observation' && e['resource']['code']?['coding']?[0]?['code'] == loinc) {
-          return e['resource']['valueQuantity']?['value']?.toString() ?? '';
-       }
-    }
-    return '';
-  }
  
-  String _extractValLegacy(List<dynamic> comps, String txt, [String? loincDisplay]) {
+  String _extractVal(List<dynamic> comps, String txt, [String? loincDisplay]) {
     try {
       for (var c in comps) {
         if (c is Map && c['code'] != null) {
@@ -550,10 +491,12 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
           }
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      debugPrint('數值提取錯誤: $e');
+    }
     return '';
   }
-
+  
   Widget _buildImageProvider(String? url) {
     if (url != null && url.isNotEmpty) {
       return Image.network(
@@ -567,25 +510,11 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
   
   @override
   Widget build(BuildContext context) {
-    bool isBundle = widget.data['resourceType'] == 'Bundle';
-    String exudate = '';
-    String tissue = '';
-    String woundTempStr = '';
-    String deltaTStr = '';
-    
-    if (isBundle) {
-      List<dynamic> entries = widget.data['entry'] ?? [];
-      exudate = _extractBundleComponent(entries, '72290-0');
-      tissue = _extractBundleComponent(entries, '72289-2');
-      woundTempStr = _extractVitalSignFromBundle(entries, '8310-5');
-      deltaTStr = _extractBundleComponent(entries, 'Temperature Difference (Delta T)', isText: true);
-    } else {
-      List<dynamic> comps = widget.data['component'] ?? [];
-      exudate = _extractValLegacy(comps, 'Exudate Amount (滲液量)', 'Exudate amount');
-      tissue = _extractValLegacy(comps, 'Tissue Type (傷口組織)', 'Tissue type in wound bed');
-      woundTempStr = _extractValLegacy(comps, 'Wound Center Temperature', 'Body temperature');
-      deltaTStr = _extractValLegacy(comps, 'Temperature Difference (Delta T)');
-    }
+    List<dynamic> comps = widget.data['component'] ?? [];
+    String exudate = _extractVal(comps, 'Exudate Amount (滲液量)', 'Exudate amount');
+    String tissue = _extractVal(comps, 'Tissue Type (傷口組織)', 'Tissue type in wound bed');
+    String woundTempStr = _extractVal(comps, 'Wound Center Temperature', 'Body temperature');
+    String deltaTStr = _extractVal(comps, 'Temperature Difference (Delta T)');
    
     double? deltaT = double.tryParse(deltaTStr);
     Color deltaColor = Colors.grey;
@@ -619,13 +548,13 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
-                    (widget.data['bodySite'] != null) ? widget.data['bodySite']['text'] ?? '未知部位' : '未知部位',
+                    widget.data['bodySite']?['text'] ?? '未知部位',
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
                 Text(
-                  _formatDateSafe(widget.data),
+                  _formatDateSafe(widget.data), // 🌟 傳入整份 data 進行時間解析
                   style: const TextStyle(color: Colors.grey, fontSize: 11),
                 ),
                 IconButton(
@@ -704,117 +633,25 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
 }
 
 // =======================================================
-// === 第二頁：歷史紀錄頁 (時間軸 Timeline 版 + 匯出 JSON) ===
+// === 第二頁：歷史紀錄頁 (🌟 時間軸 Timeline 分組版) ===
 // =======================================================
 class PatientHistoryPage extends StatefulWidget {
   final Patient patient;
-  final String patientDocId; 
-  const PatientHistoryPage({super.key, required this.patient, required this.patientDocId});
+  const PatientHistoryPage({super.key, required this.patient});
   @override State<PatientHistoryPage> createState() => _PatientHistoryPageState();
 }
+
 class _PatientHistoryPageState extends State<PatientHistoryPage> {
   late Stream<QuerySnapshot> _historyStream;
   String _selectedSite = '全部';
-  
+
   @override void initState() {
     super.initState();
-    _historyStream = FirebaseFirestore.instance
-        .collection('patients')
-        .doc(widget.patientDocId)
-        .collection('observations')
+    _historyStream = FirebaseFirestore.instance.collection('observations')
+        .where('subject.reference', isEqualTo: 'Patient/${widget.patient.id}')
         .snapshots();
   }
 
-  Future<void> _exportHistoryJson() async {
-    try {
-      final querySnapshot = await FirebaseFirestore.instance
-          .collection('patients')
-          .doc(widget.patientDocId)
-          .collection('observations')
-          .get();
-
-      if (querySnapshot.docs.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('⚠️ 目前無歷史紀錄可匯出', style: TextStyle(fontSize: 15)), backgroundColor: Colors.orange)
-          );
-        }
-        return;
-      }
-
-      List<Map<String, dynamic>> exportList = [];
-      
-      dynamic sanitize(dynamic item) {
-        if (item is Timestamp) return item.toDate().toUtc().toIso8601String();
-        if (item is Map) {
-          Map<String, dynamic> clean = {};
-          item.forEach((key, value) {
-            if (key == 'timestamp') return; 
-            clean[key.toString()] = sanitize(value);
-          });
-          return clean;
-        }
-        if (item is List) {
-          return item.map((e) => sanitize(e)).toList();
-        }
-        return item;
-      }
-
-      for (var doc in querySnapshot.docs) {
-        var data = doc.data() as Map<String, dynamic>;
-        if (_selectedSite != '全部') {
-          String site = data['bodySite']?['text'] ?? '';
-          if (site != _selectedSite) continue;
-        }
-        exportList.add(sanitize(data));
-      }
-
-      if (exportList.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('⚠️ 該部位無紀錄可匯出', style: TextStyle(fontSize: 15)), backgroundColor: Colors.orange)
-          );
-        }
-        return;
-      }
-
-      JsonEncoder encoder = const JsonEncoder.withIndent('  ');
-      String jsonString = encoder.convert(exportList);
-
-      if (!mounted) return;
-      showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Row(children: [Icon(Icons.data_object, color: Colors.blueAccent), SizedBox(width: 8), Text('匯出歷史 FHIR JSON')]),
-          content: SizedBox(
-            width: double.maxFinite, height: 400,
-            child: Container(
-              padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(8)),
-              child: SingleChildScrollView(child: SelectableText(jsonString, style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: Colors.greenAccent))),
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('關閉', style: TextStyle(color: Colors.grey))),
-            ElevatedButton.icon(
-              onPressed: () async {
-                await Clipboard.setData(ClipboardData(text: jsonString));
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ JSON 已複製到剪貼簿！', style: TextStyle(fontSize: 14)), backgroundColor: Colors.green));
-                  Navigator.pop(context);
-                }
-              },
-              icon: const Icon(Icons.copy, size: 18), label: const Text('複製全部'), style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
-            )
-          ]
-        )
-      );
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('匯出失敗: $e', style: const TextStyle(fontSize: 14)), backgroundColor: Colors.redAccent));
-      }
-    }
-  }
-  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -854,8 +691,11 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                       }
            
                       var filteredDocs = docs;
-                      if (_selectedSite != '全部') filteredDocs = docs.where((d) => ((d.data() as Map)['bodySite']?['text'] ?? '') == _selectedSite).toList();
+                      if (_selectedSite != '全部') {
+                        filteredDocs = docs.where((d) => ((d.data() as Map)['bodySite']?['text'] ?? '') == _selectedSite).toList();
+                      }
                       
+                      // 🌟 核心：將資料依照「日期」進行分組 (Time-Series)
                       Map<String, List<DocumentSnapshot>> groupedByDate = {};
                       for (var d in filteredDocs) {
                         final data = d.data() as Map<String, dynamic>;
@@ -871,6 +711,7 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                         groupedByDate[dateStr]!.add(d);
                       }
                       
+                      // 日期由新到舊排序
                       var sortedDates = groupedByDate.keys.toList()..sort((a, b) => b.compareTo(a));
            
                       return Column(
@@ -905,6 +746,7 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                                     itemBuilder: (context, index) {
                                       String dateKey = sortedDates[index];
                                       var dayDocs = groupedByDate[dateKey]!;
+                                      // 同一天內，依據時間由新到舊排序
                                       dayDocs.sort((a, b) {
                                         String timeA = (a.data() as Map)['effectiveDateTime'] ?? '';
                                         String timeB = (b.data() as Map)['effectiveDateTime'] ?? '';
@@ -914,13 +756,26 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                                       return Column(
                                         crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
+                                          // 🌟 時間軸日期標頭
                                           Padding(
-                                            padding: const EdgeInsets.only(top: 16, bottom: 12, left: 4),
+                                            padding: const EdgeInsets.only(top: 20, bottom: 12, left: 4),
                                             child: Row(
                                               children: [
-                                                const Icon(Icons.calendar_today, size: 16, color: Colors.blueAccent),
-                                                const SizedBox(width: 8),
-                                                Text(dateKey, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.blueAccent.withValues(alpha: 0.15),
+                                                    borderRadius: BorderRadius.circular(20),
+                                                    border: Border.all(color: Colors.blueAccent.withValues(alpha: 0.5))
+                                                  ),
+                                                  child: Row(
+                                                    children: [
+                                                      const Icon(Icons.calendar_month, size: 16, color: Colors.blueAccent),
+                                                      const SizedBox(width: 6),
+                                                      Text(dateKey, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.blueAccent)),
+                                                    ],
+                                                  ),
+                                                ),
                                                 const SizedBox(width: 12),
                                                 Expanded(child: Container(height: 1, color: Colors.blueAccent.withValues(alpha: 0.2)))
                                               ],
@@ -938,12 +793,7 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                                                     TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
                                                     ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent), onPressed: () async { 
                                                       Navigator.pop(ctx); 
-                                                      await FirebaseFirestore.instance
-                                                          .collection('patients')
-                                                          .doc(widget.patientDocId)
-                                                          .collection('observations')
-                                                          .doc(doc.id)
-                                                          .delete(); 
+                                                      await FirebaseFirestore.instance.collection('observations').doc(doc.id).delete(); 
                                                     }, child: const Text('刪除', style: TextStyle(color: Colors.white)))
                                                   ]
                                                 )
@@ -965,27 +815,12 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
           ),
         ),
       ),
-      floatingActionButton: Column(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          FloatingActionButton.extended(
-            heroTag: 'export_history_json',
-            onPressed: _exportHistoryJson,
-            icon: const Icon(Icons.data_object, size: 20),
-            label: const Text('匯出歷史 JSON', style: TextStyle(fontSize: 15)),
-            backgroundColor: Colors.indigoAccent,
-            foregroundColor: Colors.white
-          ),
-          const SizedBox(height: 12),
-          FloatingActionButton.extended(
-            heroTag: 'add_record',
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => BodyPartSelectionPage(patient: widget.patient, patientDocId: widget.patientDocId))),
-            icon: const Icon(Icons.camera_alt, size: 20),
-            label: const Text('新增紀錄', style: TextStyle(fontSize: 15)),
-            backgroundColor: Colors.blueAccent,
-            foregroundColor: Colors.white
-          ),
-        ],
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (context) => BodyPartSelectionPage(patient: widget.patient))),
+        icon: const Icon(Icons.camera_alt, size: 20),
+        label: const Text('新增紀錄', style: TextStyle(fontSize: 15)),
+        backgroundColor: Colors.blueAccent,
+        foregroundColor: Colors.white
       ),
     );
   }
@@ -993,22 +828,17 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
 }
 
 // =======================================================
-// === 拍攝流程：全螢幕引導精靈 (🌟 Task 4: UI 重構與 DI 介接) ===
+// === 拍攝流程：全螢幕引導精靈 ===
 // =======================================================
 class WoundCaptureWizardPage extends StatefulWidget {
-  final Patient patient; // 🌟 新增：傳遞病患資料，供感測器使用
   final String partName;
-  const WoundCaptureWizardPage({super.key, required this.patient, required this.partName});
+  const WoundCaptureWizardPage({super.key, required this.partName});
   @override State<WoundCaptureWizardPage> createState() => _WoundCaptureWizardPageState();
 }
 class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
   int _currentStep = 0;
   final ImagePicker _picker = ImagePicker();
-  
-  // 🌟 Task 4: 透過 Service Locator 取得感測器實作
-  final ThermalCameraService _thermalService = sensorLocator.thermalCamera;
-  final TemperatureSensorService _tempSensorService = sensorLocator.temperatureSensor;
-  
+  final ThermalCameraService _thermalService = MockThermalCamera();
   Uint8List? rgbBytes;
   Uint8List? thermalBytes;
  
@@ -1016,10 +846,11 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
   Offset _refPoint = const Offset(0.2, 0.8);  
   double _woundTemp = 38.2;
   double _referenceTemp = 35.8;
-  DateTime _selectedCaptureTime = DateTime.now();
+  DateTime _selectedCaptureTime = DateTime.now(); // 🌟 預設為當下時間
  
   final WoundFeatureData featureData = WoundFeatureData();
   
+  // 🌟 新增時間挑選器
   Future<void> _pickDateTime() async {
     final DateTime? date = await showDatePicker(context: context, initialDate: _selectedCaptureTime, firstDate: DateTime(2020), lastDate: DateTime.now());
     if (date != null && mounted) {
@@ -1137,6 +968,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
       return Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
+          // 🌟 加入時間修改區塊
           Container(
             margin: const EdgeInsets.only(bottom: 20), padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
             decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.05), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white12)),
@@ -1146,7 +978,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('實際拍攝時間 (支援回溯補登)', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                    const Text('評估記錄時間 (支援事後補登)', style: TextStyle(color: Colors.grey, fontSize: 12)),
                     const SizedBox(height: 4),
                     Text('${_selectedCaptureTime.year}-${_selectedCaptureTime.month.toString().padLeft(2,'0')}-${_selectedCaptureTime.day.toString().padLeft(2,'0')} ${_selectedCaptureTime.hour.toString().padLeft(2,'0')}:${_selectedCaptureTime.minute.toString().padLeft(2,'0')}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.blueAccent)),
                   ],
@@ -1235,33 +1067,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
               )
             ),
             const SizedBox(height: 12),
-            
-            // 🌟 Task 4: 新增 Pixel 溫度量測按鈕
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: () async {
-                  final obs = await _tempSensorService.captureTemperature(
-                    patient: widget.patient,
-                    bodySite: widget.partName,
-                    captureTime: _selectedCaptureTime,
-                  );
-                  if (obs != null && mounted) {
-                    setState(() {
-                      _woundTemp = obs.temperature;
-                    });
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('✅ Pixel 溫度感測成功: $_woundTemp°C', style: const TextStyle(fontWeight: FontWeight.bold)), backgroundColor: Colors.teal)
-                    );
-                  }
-                },
-                icon: const Icon(Icons.sensors, size: 20),
-                label: const Text('使用 Pixel 溫度感測器量測'),
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal.shade700, foregroundColor: Colors.white),
-              ),
-            ),
-            const SizedBox(height: 12),
-
+           
             Container(
               padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
               decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.05), borderRadius: BorderRadius.circular(8), border: Border.all(color: deltaT >= 2.0 ? Colors.redAccent : Colors.greenAccent)),
@@ -1345,7 +1151,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
                       features: featureData,
                       woundTemp: _woundTemp,
                       referenceTemp: _referenceTemp,
-                      captureTime: _selectedCaptureTime,
+                      captureTime: _selectedCaptureTime, // 🌟 傳入選定的時間
                     );
                     Navigator.pop(context, record);
                   },
@@ -1367,8 +1173,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
 // =======================================================
 class BodyPartSelectionPage extends StatefulWidget {
   final Patient patient;
-  final String patientDocId; 
-  const BodyPartSelectionPage({super.key, required this.patient, required this.patientDocId});
+  const BodyPartSelectionPage({super.key, required this.patient});
   @override State<BodyPartSelectionPage> createState() => _BodyPartSelectionPageState();
 }
 class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
@@ -1379,111 +1184,63 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
   @override 
   void initState() {
     super.initState();
-    _woundsStream = FirebaseFirestore.instance
-        .collection('patients')
-        .doc(widget.patientDocId)
-        .collection('observations')
-        .snapshots();
+    _woundsStream = FirebaseFirestore.instance.collection('observations').where('subject.reference', isEqualTo: 'Patient/${widget.patient.id}').snapshots();
   }
   
-  Future<void> _exportFHIRJson() async {
-    List<Map<String, dynamic>> exportList = [];
-    String dialogTitle = '';
-
+  void _exportFHIRJson() {
     if (_capturedWounds.isEmpty) {
-      try {
-        final querySnapshot = await FirebaseFirestore.instance
-            .collection('patients')
-            .doc(widget.patientDocId)
-            .collection('observations')
-            .get();
-
-        if (querySnapshot.docs.isEmpty) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('⚠️ 目前無暫存影像，且資料庫無歷史紀錄', style: TextStyle(fontSize: 15)), backgroundColor: Colors.orange)
-            );
-          }
-          return;
-        }
-
-        dynamic sanitize(dynamic item) {
-          if (item is Timestamp) return item.toDate().toUtc().toIso8601String();
-          if (item is Map) {
-            Map<String, dynamic> clean = {};
-            item.forEach((key, value) {
-              if (key == 'timestamp') return; 
-              clean[key.toString()] = sanitize(value);
-            });
-            return clean;
-          }
-          if (item is List) return item.map((e) => sanitize(e)).toList();
-          return item;
-        }
-
-        for (var doc in querySnapshot.docs) {
-          exportList.add(sanitize(doc.data()));
-        }
-        dialogTitle = '匯出 FHIR JSON (全部歷史紀錄)';
-
-      } catch (e) {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('歷史紀錄讀取失敗: $e'), backgroundColor: Colors.redAccent));
-        return;
-      }
-    } 
-    else {
-      for (var entry in _capturedWounds.entries) {
-        String partName = entry.key;
-        WoundPhotoRecord record = entry.value;
-        
-        final fhirObservation = FhirWoundObservation(
-          subject: widget.patient, bodySite: partName, bradenScore: widget.patient.bradenScore,
-          features: record.features, woundTemp: record.woundTemp, referenceTemp: record.referenceTemp, captureTime: record.captureTime,
-        );
-        final rgbMedia = FhirMedia(subject: widget.patient, base64Data: base64Encode(record.rgbBytes), title: 'RGB Optical Image', bodySite: partName, captureTime: record.captureTime);
-        final thermalMedia = FhirMedia(subject: widget.patient, base64Data: base64Encode(record.thermalBytes), title: 'Thermal Infrared Image', bodySite: partName, captureTime: record.captureTime);
-        final tempObservation = FhirTemperatureObservation(subject: widget.patient, temperature: record.woundTemp, bodySite: partName, captureTime: record.captureTime);
-
-        exportList.add({
-          "resourceType": "Bundle",
-          "type": "collection",
-          "entry": [
-            {"resource": fhirObservation.toJson()},
-            {"resource": tempObservation.toJson()},
-            {"resource": rgbMedia.toJson()},
-            {"resource": thermalMedia.toJson()}
-          ]
-        });
-      }
-      dialogTitle = '匯出 FHIR JSON (本次暫存紀錄)';
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('⚠️️ 尚未拍攝任何部位影像', style: TextStyle(fontSize: 15)), backgroundColor: Colors.orange));
+      return;
     }
-
-    JsonEncoder encoder = const JsonEncoder.withIndent('  ');
-    String jsonString = encoder.convert(exportList);
     
-    if (!mounted) return;
+    List<Map<String, dynamic>> fhirBundle = [];
+    for (var entry in _capturedWounds.entries) {
+      String partName = entry.key;
+      WoundPhotoRecord record = entry.value;
+      
+      final fhirObservation = FhirWoundObservation(
+        subject: widget.patient,
+        bodySite: partName,
+        bradenScore: widget.patient.bradenScore,
+        features: record.features,
+        rgbBase64: base64Encode(record.rgbBytes),
+        thermalBase64: base64Encode(record.thermalBytes),
+        woundTemp: record.woundTemp,
+        referenceTemp: record.referenceTemp,
+        captureTime: record.captureTime, // 🌟 FHIR 綁定時間
+      );
+      fhirBundle.add(fhirObservation.toFhirJson());
+    }
+    JsonEncoder encoder = const JsonEncoder.withIndent('  ');
+    String jsonString = encoder.convert(fhirBundle);
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Row(children: [const Icon(Icons.data_object, color: Colors.blueAccent), const SizedBox(width: 8), Text(dialogTitle, style: const TextStyle(fontSize: 16))]),
+        title: const Row(children: [Icon(Icons.data_object, color: Colors.blueAccent), SizedBox(width: 8), Text('匯出 FHIR JSON')]),
         content: SizedBox(
-          width: double.maxFinite, height: 400,
+          width: double.maxFinite,
+          height: 400,
           child: Container(
-            padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(8)),
-            child: SingleChildScrollView(child: SelectableText(jsonString, style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: Colors.greenAccent))),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(8)),
+            child: SingleChildScrollView(
+              child: SelectableText(jsonString, style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: Colors.greenAccent)),
+            ),
           ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('關閉', style: TextStyle(color: Colors.grey))),
           ElevatedButton.icon(
             onPressed: () async {
-              await Clipboard.setData(ClipboardData(text: jsonString));
+              await Clipboard.setData(ClipboardData(text: jsonString)); 
               if (context.mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ JSON 已複製到剪貼簿！可直接貼上存檔', style: TextStyle(fontSize: 14)), backgroundColor: Colors.green));
                 Navigator.pop(context);
               }
             },
-            icon: const Icon(Icons.copy, size: 18), label: const Text('複製全部'), style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+            icon: const Icon(Icons.copy, size: 18),
+            label: const Text('複製全部'),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
           )
         ]
       )
@@ -1503,33 +1260,19 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
         WoundPhotoRecord record = entry.value;
        
         final fhirObservation = FhirWoundObservation(
-          subject: widget.patient, bodySite: partName, bradenScore: widget.patient.bradenScore,
-          features: record.features, woundTemp: record.woundTemp, referenceTemp: record.referenceTemp, captureTime: record.captureTime,
+          subject: widget.patient,
+          bodySite: partName,
+          bradenScore: widget.patient.bradenScore,
+          features: record.features,
+          rgbBase64: base64Encode(record.rgbBytes),
+          thermalBase64: base64Encode(record.thermalBytes),
+          woundTemp: record.woundTemp,
+          referenceTemp: record.referenceTemp,
+          captureTime: record.captureTime, // 🌟 FHIR 綁定時間
         );
-        final rgbMedia = FhirMedia(subject: widget.patient, base64Data: base64Encode(record.rgbBytes), title: 'RGB Optical Image', bodySite: partName, captureTime: record.captureTime);
-        final thermalMedia = FhirMedia(subject: widget.patient, base64Data: base64Encode(record.thermalBytes), title: 'Thermal Infrared Image', bodySite: partName, captureTime: record.captureTime);
-        final tempObservation = FhirTemperatureObservation(subject: widget.patient, temperature: record.woundTemp, bodySite: partName, captureTime: record.captureTime);
-
-        Map<String, dynamic> bundleJson = {
-          "resourceType": "Bundle",
-          "type": "collection",
-          "timestamp": FieldValue.serverTimestamp(),
-          "effectiveDateTime": record.captureTime.toUtc().toIso8601String(),
-          "bodySite": {"text": partName},
-          "entry": [
-            {"resource": fhirObservation.toJson()},
-            {"resource": tempObservation.toJson()},
-            {"resource": rgbMedia.toJson()},
-            {"resource": thermalMedia.toJson()}
-          ]
-        };
-        
-        await firestore
-            .collection('patients')
-            .doc(widget.patientDocId)
-            .collection('observations')
-            .add(bundleJson)
-            .timeout(const Duration(seconds: 10));
+        Map<String, dynamic> finalJson = fhirObservation.toFhirJson();
+        finalJson['timestamp'] = FieldValue.serverTimestamp(); // 🌟 雙軌時間戳：供系統稽核
+        await firestore.collection('observations').add(finalJson).timeout(const Duration(seconds: 10));
       }
       if (!mounted) return;
       Navigator.pop(context); Navigator.pop(context);
@@ -1541,50 +1284,57 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
   
   Widget _viewButton(String label, IconData icon, bool viewState) => ElevatedButton.icon(
     onPressed: () => setState(() => isBackView = viewState), 
-    icon: Icon(icon, size: 18), label: Text(label, style: const TextStyle(fontSize: 14)), 
-    style: ElevatedButton.styleFrom(backgroundColor: isBackView == viewState ? Colors.blueAccent : const Color(0xFF2C2C2C), foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8))
+    icon: Icon(icon, size: 18), 
+    label: Text(label, style: const TextStyle(fontSize: 14)), 
+    style: ElevatedButton.styleFrom(
+      backgroundColor: isBackView == viewState ? Colors.blueAccent : const Color(0xFF2C2C2C), 
+      foregroundColor: Colors.white, 
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8)
+    )
   );
   
   List<Widget> _buildBackDots(BuildContext context, Set<String> existing) => [
-    _point(context, 0.73, 0.12, '後腦勺 (Back of Head)', existing), _point(context, 0.58, 0.23, '左側肩胛骨 (L Shoulder Blade)', existing), 
-    _point(context, 0.88, 0.23, '右側肩胛骨 (R Shoulder Blade)', existing), _point(context, 0.46, 0.38, '左側肘部 (L Elbow)', existing),
-    _point(context, 0.98, 0.38, '右側肘部 (R Elbow)', existing), _point(context, 0.73, 0.40, '脊椎 (Spine)', existing),
-    _point(context, 0.73, 0.50, '薦骨/尾椎 (Sacrum)', existing), _point(context, 0.65, 0.55, '左側坐骨脊 (L Ischial Tuberosity)', existing),
-    _point(context, 0.81, 0.55, '右側坐骨脊 (R Ischial Tuberosity)', existing), _point(context, 0.68, 0.89, '左側足跟 (L Heel)', existing),
+    _point(context, 0.73, 0.12, '後腦勺 (Back of Head)', existing),
+    _point(context, 0.58, 0.23, '左側肩胛骨 (L Shoulder Blade)', existing), 
+    _point(context, 0.88, 0.23, '右側肩胛骨 (R Shoulder Blade)', existing),
+    _point(context, 0.46, 0.38, '左側肘部 (L Elbow)', existing),
+    _point(context, 0.98, 0.38, '右側肘部 (R Elbow)', existing),
+    _point(context, 0.73, 0.40, '脊椎 (Spine)', existing),
+    _point(context, 0.73, 0.50, '薦骨/尾椎 (Sacrum)', existing),
+    _point(context, 0.65, 0.55, '左側坐骨脊 (L Ischial Tuberosity)', existing),
+    _point(context, 0.81, 0.55, '右側坐骨脊 (R Ischial Tuberosity)', existing),
+    _point(context, 0.68, 0.89, '左側足跟 (L Heel)', existing),
     _point(context, 0.78, 0.89, '右側足跟 (R Heel)', existing),
   ];
   
   List<Widget> _buildFrontDots(BuildContext context, Set<String> existing) => [
-    _point(context, 0.30, 0.16, '右側耳部 (R Ear)', existing), _point(context, 0.47, 0.16, '左側耳部 (L Ear)', existing),
-    _point(context, 0.19, 0.25, '右側肩部 (R Shoulder)', existing), _point(context, 0.57, 0.25, '左側肩部 (L Shoulder)', existing),
-    _point(context, 0.38, 0.34, '胸廓中央 (Chest)', existing), _point(context, 0.26, 0.44, '右側髖部 (R Hip)', existing),
-    _point(context, 0.50, 0.44, '左側髖部 (L Hip)', existing), _point(context, 0.32, 0.66, '右側膝蓋 (R Knee)', existing),
-    _point(context, 0.45, 0.66, '左側膝蓋 (L Knee)', existing), _point(context, 0.33, 0.87, '右側足趾 (R Toes)', existing),
+    _point(context, 0.30, 0.16, '右側耳部 (R Ear)', existing), 
+    _point(context, 0.47, 0.16, '左側耳部 (L Ear)', existing),
+    _point(context, 0.19, 0.25, '右側肩部 (R Shoulder)', existing),
+    _point(context, 0.57, 0.25, '左側肩部 (L Shoulder)', existing),
+    _point(context, 0.38, 0.34, '胸廓中央 (Chest)', existing), 
+    _point(context, 0.26, 0.44, '右側髖部 (R Hip)', existing),
+    _point(context, 0.50, 0.44, '左側髖部 (L Hip)', existing),
+    _point(context, 0.32, 0.66, '右側膝蓋 (R Knee)', existing),
+    _point(context, 0.45, 0.66, '左側膝蓋 (L Knee)', existing),
+    _point(context, 0.33, 0.87, '右側足趾 (R Toes)', existing),
     _point(context, 0.45, 0.87, '左側足趾 (L Toes)', existing),
   ];
   
   Widget _point(BuildContext context, double xPercent, double yPercent, String name, Set<String> existing) {
-    bool isJustCaptured = _capturedWounds.containsKey(name);
-    bool isHistoricallyRecorded = existing.contains(name);
-    Color dotColor; IconData dotIcon;
-    
-    if (isJustCaptured) {
-      dotColor = Colors.greenAccent.withValues(alpha: 0.9); dotIcon = Icons.check;
-    } else if (isHistoricallyRecorded) {
-      dotColor = Colors.amberAccent.withValues(alpha: 0.9); dotIcon = Icons.history;
-    } else {
-      dotColor = Colors.redAccent.withValues(alpha: 0.85); dotIcon = Icons.add;
-    }
+    bool isTaken = _capturedWounds.containsKey(name) || existing.contains(name);
    
     return Align(
-      alignment: Alignment((xPercent * 2) - 1, (yPercent * 2) - 1),
+      alignment: Alignment(
+        (xPercent * 2) - 1,
+        (yPercent * 2) - 1
+      ),
       child: GestureDetector(
         onTap: () async {
-          if (isJustCaptured) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 已在本次暫存清單中，若需重拍請先上傳後再新增', style: TextStyle(fontSize: 14))));
+          if (isTaken) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('⚠️ 已有紀錄，請至歷史紀錄刪除重拍。', style: TextStyle(fontSize: 14))));
           } else {
-            // 🌟 修正：確保在此處將 patient 一起傳入 WoundCaptureWizardPage
-            final WoundPhotoRecord? result = await Navigator.push(context, MaterialPageRoute(builder: (context) => WoundCaptureWizardPage(patient: widget.patient, partName: name)));
+            final WoundPhotoRecord? result = await Navigator.push(context, MaterialPageRoute(builder: (context) => WoundCaptureWizardPage(partName: name)));
             if (result != null) {
               setState(() { _capturedWounds[name] = result; });
               if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('✅ 評估已暫存，請繼續標記或點擊上傳', style: TextStyle(fontSize: 14)), backgroundColor: Colors.green));
@@ -1592,9 +1342,15 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
           }
         },
         child: Container(
-          width: 36, height: 36,
-          decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle, border: Border.all(color: Colors.white, width: 2), boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 4)]), 
-          child: Icon(dotIcon, size: 20, color: Colors.white)
+          width: 36, 
+          height: 36,
+          decoration: BoxDecoration(
+            color: isTaken ? Colors.greenAccent.withValues(alpha: 0.9) : Colors.redAccent.withValues(alpha: 0.85), 
+            shape: BoxShape.circle, 
+            border: Border.all(color: Colors.white, width: 2),
+            boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 4)]
+          ), 
+          child: Icon(isTaken ? Icons.check : Icons.add, size: 20, color: Colors.white)
         ),
       ),
     );
@@ -1613,7 +1369,9 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
             if (snapshot.hasData) { 
               for (var doc in snapshot.data!.docs) { 
                 var data = doc.data() as Map<String, dynamic>; 
-                if (data['bodySite'] != null && data['bodySite']['text'] != null) existingWounds.add(data['bodySite']['text']); 
+                if (data['bodySite'] != null && data['bodySite']['text'] != null) {
+                  existingWounds.add(data['bodySite']['text']); 
+                }
               } 
             }
            
@@ -1622,14 +1380,24 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
               child: Column(
                 children: [
                   const SizedBox(height: 12),
-                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [_viewButton('背面觀', Icons.person_search, true), const SizedBox(width: 16), _viewButton('正面觀', Icons.person, false)]),
-                  const Padding(padding: EdgeInsets.symmetric(vertical: 12), child: Text('🔴 未拍攝   🟡 歷史需追蹤   🟢 本次已拍攝', style: TextStyle(color: Colors.white70, fontSize: 13))),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _viewButton('背面觀', Icons.person_search, true),
+                      const SizedBox(width: 16),
+                      _viewButton('正面觀', Icons.person, false)
+                    ]
+                  ),
+                  const Padding(padding: EdgeInsets.symmetric(vertical: 12), child: Text('點選圖上位置進行拍攝：', style: TextStyle(color: Colors.grey, fontSize: 14))),
                  
                   LayoutBuilder(
                     builder: (context, constraints) {
-                      double maxWidth = constraints.maxWidth; double containerWidth;
+                      double maxWidth = constraints.maxWidth;
+                      double containerWidth;
                       if (maxWidth > 600) {
-                        double screenHeight = MediaQuery.of(context).size.height; containerWidth = (screenHeight * 0.65) * (350 / 600); 
+                        double screenHeight = MediaQuery.of(context).size.height;
+                        double targetHeight = screenHeight * 0.65; 
+                        containerWidth = targetHeight * (350 / 600); 
                       } else {
                         containerWidth = isLandscape ? 180 : (maxWidth > 380 ? 380 : maxWidth * 0.92);
                       }
@@ -1639,9 +1407,11 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
                         child: Container(
                           width: containerWidth, height: containerHeight, decoration: BoxDecoration(color: const Color(0xFF1E1E1E), border: Border.all(color: Colors.grey.shade800), borderRadius: BorderRadius.circular(16)),
                           child: Stack(
-                            alignment: Alignment.center, clipBehavior: Clip.none,
+                            alignment: Alignment.center,
+                            clipBehavior: Clip.none,
                             children: [
                               ClipRRect(borderRadius: BorderRadius.circular(16), child: Image.asset(isBackView ? 'assets/images/body_back.png.jpg' : 'assets/images/body_front.png.jpg', width: containerWidth, height: containerHeight, fit: BoxFit.fill, errorBuilder: (c,e,s) => const Center(child: Text("找不到圖片")))),
+                              
                               if (isBackView) ..._buildBackDots(context, existingWounds),
                               if (!isBackView) ..._buildFrontDots(context, existingWounds),
                             ],
@@ -1660,9 +1430,23 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       floatingActionButton: Column(
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
-          FloatingActionButton.extended(heroTag: 'export_json', onPressed: _exportFHIRJson, icon: const Icon(Icons.data_object, size: 20), label: const Text('匯出 JSON', style: TextStyle(fontSize: 15)), backgroundColor: Colors.indigoAccent, foregroundColor: Colors.white),
+          FloatingActionButton.extended(
+            heroTag: 'export_json',
+            onPressed: _exportFHIRJson,
+            icon: const Icon(Icons.data_object, size: 20),
+            label: const Text('匯出 JSON', style: TextStyle(fontSize: 15)),
+            backgroundColor: Colors.indigoAccent,
+            foregroundColor: Colors.white
+          ),
           const SizedBox(height: 12),
-          FloatingActionButton.extended(heroTag: 'upload_db', onPressed: _uploadAllToHospitalSystem, icon: const Icon(Icons.cloud_upload, size: 20), label: const Text('上傳 FHIR 病歷', style: TextStyle(fontSize: 15)), backgroundColor: Colors.green, foregroundColor: Colors.white),
+          FloatingActionButton.extended(
+            heroTag: 'upload_db',
+            onPressed: _uploadAllToHospitalSystem,
+            icon: const Icon(Icons.cloud_upload, size: 20),
+            label: const Text('上傳 FHIR 病歷', style: TextStyle(fontSize: 15)),
+            backgroundColor: Colors.green,
+            foregroundColor: Colors.white
+          ),
         ],
       ),
     );
