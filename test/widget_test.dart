@@ -60,8 +60,13 @@ class _FakeThermalFrame implements ThermalFrame {
 }
 
 class _FakeWoundCameraService implements WoundCameraService {
+  _FakeWoundCameraService({this.events});
+
+  final List<String>? events;
+
   @override
   Future<WoundCameraCapture?> capturePair() async {
+    events?.add('capture');
     final imageBytes = base64Decode(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lS8AAAAASUVORK5CYII=',
     );
@@ -89,6 +94,7 @@ void main() {
   testWidgets('updates the selected thermal point when the image is tapped', (
     WidgetTester tester,
   ) async {
+    final events = <String>[];
     const patient = Patient(
       bedNumber: '301-A',
       name: '測試病患',
@@ -102,7 +108,11 @@ void main() {
         home: WoundCaptureWizardPage(
           patient: patient,
           partName: '足跟',
-          cameraService: _FakeWoundCameraService(),
+          cameraService: _FakeWoundCameraService(events: events),
+          resolveUserUid: () async {
+            events.add('auth');
+            return 'test-user-uid';
+          },
         ),
       ),
     );
@@ -110,6 +120,7 @@ void main() {
     await tester.ensureVisible(find.text('擷取 RGB + Thermal'));
     await tester.tap(find.text('擷取 RGB + Thermal'));
     await tester.pumpAndSettle();
+    expect(events, ['auth', 'capture']);
     await tester.ensureVisible(find.text('下一步').first);
     await tester.tap(find.text('下一步').first);
     await tester.pumpAndSettle();
@@ -130,6 +141,51 @@ void main() {
     expect(
       tester.widget<Text>(temperatureFinder).data,
       isNot(temperatureBeforeTap),
+    );
+  });
+
+  testWidgets('does not open the camera when anonymous auth fails', (
+    WidgetTester tester,
+  ) async {
+    final events = <String>[];
+    const patient = Patient(
+      bedNumber: '301-A',
+      name: '測試病患',
+      id: 'test-001',
+      gender: '女',
+      age: 70,
+      bradenScore: 15,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WoundCaptureWizardPage(
+          patient: patient,
+          partName: '足跟',
+          cameraService: _FakeWoundCameraService(events: events),
+          resolveUserUid: () async => throw StateError('sign-in failed'),
+        ),
+      ),
+    );
+
+    await tester.ensureVisible(find.text('擷取 RGB + Thermal'));
+    await tester.tap(find.text('擷取 RGB + Thermal'));
+    await tester.pumpAndSettle();
+
+    expect(events, isEmpty);
+    expect(
+      find.text('匿名登入失敗，請確認 Firebase Console 已啟用 Anonymous Auth。'),
+      findsOneWidget,
+    );
+  });
+
+  test('scopes wound image storage paths by Firebase UID', () {
+    expect(
+      patientImageStorageDirectory(
+        uid: 'anonymous-uid',
+        patientDocId: 'patient-doc',
+        uploadId: 'upload-1',
+      ),
+      'patient_images/anonymous-uid/patient-doc/upload-1',
     );
   });
 

@@ -1,18 +1,59 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'data/patient_repository.dart';
 import 'firebase_options.dart';
 import 'models/patient.dart';
 
+Future<String>? _initialAnonymousAuth;
+
+Future<String> _signInAnonymouslyAndGetUid() async {
+  final auth = FirebaseAuth.instance;
+  final currentUser = auth.currentUser;
+  if (currentUser != null) return currentUser.uid;
+
+  final credential = await auth.signInAnonymously();
+  final uid = credential.user?.uid;
+  if (uid == null || uid.isEmpty) {
+    throw StateError('Anonymous sign-in completed without a user UID.');
+  }
+  return uid;
+}
+
+Future<String> _ensureAnonymousUid() async {
+  final initialAuth = _initialAnonymousAuth;
+  if (initialAuth != null) {
+    final uid = await initialAuth;
+    if (FirebaseAuth.instance.currentUser?.uid == uid) return uid;
+  }
+  return _signInAnonymouslyAndGetUid();
+}
+
+String patientImageStorageDirectory({
+  required String uid,
+  required String patientDocId,
+  required String uploadId,
+}) => 'patient_images/$uid/$patientDocId/$uploadId';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  _initialAnonymousAuth = _signInAnonymouslyAndGetUid();
+  unawaited(
+    _initialAnonymousAuth!.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('Anonymous sign-in failed: $error');
+      },
+    ),
+  );
   runApp(const WoundCareApp());
 }
 
@@ -2346,11 +2387,13 @@ class WoundCaptureWizardPage extends StatefulWidget {
   final Patient patient;
   final String partName;
   final WoundCameraService? cameraService;
+  final Future<String> Function()? resolveUserUid;
   const WoundCaptureWizardPage({
     super.key,
     required this.patient,
     required this.partName,
     this.cameraService,
+    this.resolveUserUid,
   });
   @override
   State<WoundCaptureWizardPage> createState() => _WoundCaptureWizardPageState();
@@ -2409,6 +2452,9 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
     if (_isCapturing) return;
     setState(() => _isCapturing = true);
     try {
+      final uid = await (widget.resolveUserUid ?? _ensureAnonymousUid)();
+      if (uid.isEmpty)
+        throw StateError('Anonymous sign-in returned an empty UID.');
       final capture = await _cameraService.capturePair();
       if (capture == null || !mounted) return;
       setState(() {
@@ -2422,9 +2468,12 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
     } catch (error) {
       debugPrint('影像擷取失敗: $error');
       if (mounted) {
+        final message = error is FirebaseAuthException || error is StateError
+            ? '匿名登入失敗，請確認 Firebase Console 已啟用 Anonymous Auth。'
+            : '影像擷取失敗，請重試。';
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text('影像擷取失敗，請重試。')));
+        ).showSnackBar(SnackBar(content: Text(message)));
       }
     } finally {
       if (mounted) setState(() => _isCapturing = false);
@@ -3330,13 +3379,17 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       builder: (context) => const Center(child: CircularProgressIndicator()),
     );
     try {
+      final uid = await _ensureAnonymousUid();
       final firestore = FirebaseFirestore.instance;
       for (var entry in _capturedWounds.entries) {
         String partName = entry.key;
         WoundPhotoRecord record = entry.value;
         final uploadId = DateTime.now().microsecondsSinceEpoch.toString();
-        final storageDirectory =
-            'patients/${widget.patientDocId}/observations/$uploadId';
+        final storageDirectory = patientImageStorageDirectory(
+          uid: uid,
+          patientDocId: widget.patientDocId,
+          uploadId: uploadId,
+        );
         final rgbReference = FirebaseStorage.instance.ref().child(
           '$storageDirectory/rgb.jpg',
         );
@@ -3441,7 +3494,9 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
     } catch (e) {
       if (!mounted) return;
       Navigator.pop(context);
-      final errorMessage = e is FirebaseException && e.code == 'quota-exceeded'
+      final errorMessage = e is FirebaseAuthException
+          ? '匿名登入失敗，請確認 Firebase Console 已啟用 Anonymous Auth。'
+          : e is FirebaseException && e.code == 'quota-exceeded'
           ? 'Firebase Storage 容量配額已滿。請清理舊檔或升級 Firebase 方案後重試。'
           : '上傳失敗: $e';
       ScaffoldMessenger.of(context).showSnackBar(
