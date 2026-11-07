@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'data/patient_repository.dart';
 import 'firebase_options.dart';
 import 'models/patient.dart';
@@ -196,14 +197,16 @@ class WoundPhotoRecord {
 
 class FhirMedia {
   final Patient subject;
-  final String base64Data;
+  final String? base64Data;
+  final String? url;
   final String contentType;
   final String title;
   final String bodySite;
   final DateTime captureTime;
   FhirMedia({
     required this.subject,
-    required this.base64Data,
+    this.base64Data,
+    this.url,
     this.contentType = 'image/jpeg',
     required this.title,
     required this.bodySite,
@@ -215,8 +218,38 @@ class FhirMedia {
     "subject": {"reference": "Patient/${subject.id}", "display": subject.name},
     "createdDateTime": captureTime.toUtc().toIso8601String(),
     "bodySite": {"text": bodySite},
-    "content": {"contentType": contentType, "data": base64Data, "title": title},
+    "content": {
+      "contentType": contentType,
+      if (url != null)
+        "url": url
+      else if (base64Data != null)
+        "data": base64Data,
+      "title": title,
+    },
   };
+}
+
+Future<void> _deleteStoredMediaFromBundle(Map<String, dynamic> bundle) async {
+  final entries = bundle['entry'];
+  if (entries is! List) return;
+
+  for (final entry in entries) {
+    if (entry is! Map) continue;
+    final resource = entry['resource'];
+    if (resource is! Map || resource['resourceType'] != 'Media') continue;
+    final content = resource['content'];
+    final url = content is Map ? content['url'] : null;
+    if (url is! String ||
+        !url.startsWith('https://firebasestorage.googleapis.com/')) {
+      continue;
+    }
+
+    try {
+      await FirebaseStorage.instance.refFromURL(url).delete();
+    } on FirebaseException catch (error) {
+      if (error.code != 'object-not-found') rethrow;
+    }
+  }
 }
 
 class FhirTemperatureObservation {
@@ -394,6 +427,409 @@ class FhirWoundObservation {
 // =======================================================
 // === 第一頁：病患清單 ===
 // =======================================================
+class BradenScaleResult {
+  final int totalScore;
+  final String riskLevel;
+  final Map<String, int>? subscaleScores;
+
+  const BradenScaleResult({
+    required this.totalScore,
+    required this.riskLevel,
+    this.subscaleScores,
+  });
+
+  factory BradenScaleResult.fromScore(
+    int totalScore, {
+    Map<String, int>? subscaleScores,
+  }) {
+    if (totalScore < 6 || totalScore > 23) {
+      throw RangeError.range(totalScore, 6, 23, 'totalScore');
+    }
+    return BradenScaleResult(
+      totalScore: totalScore,
+      riskLevel: riskLevelFor(totalScore),
+      subscaleScores: subscaleScores == null
+          ? null
+          : Map.unmodifiable(subscaleScores),
+    );
+  }
+
+  static String riskLevelFor(int score) {
+    if (score >= 19) return 'Low Risk';
+    if (score >= 15) return 'Mild Risk';
+    if (score >= 13) return 'Moderate Risk';
+    if (score >= 10) return 'High Risk';
+    return 'Severe Risk';
+  }
+
+  static Color riskColorFor(int score) {
+    if (score >= 19) return Colors.green;
+    if (score >= 15) return Colors.lightGreen;
+    if (score >= 13) return Colors.orange;
+    if (score >= 10) return Colors.deepOrange;
+    return Colors.red;
+  }
+}
+
+enum _BradenInputMode { detailed, direct }
+
+class _BradenSubscale {
+  final String label;
+  final int maxScore;
+  final String? definition;
+
+  const _BradenSubscale(this.label, this.maxScore, {this.definition});
+}
+
+class BradenScaleAssessmentSheet extends StatefulWidget {
+  final BradenScaleResult? initialResult;
+
+  const BradenScaleAssessmentSheet({super.key, this.initialResult});
+
+  @override
+  State<BradenScaleAssessmentSheet> createState() =>
+      _BradenScaleAssessmentSheetState();
+}
+
+class _BradenScaleAssessmentSheetState
+    extends State<BradenScaleAssessmentSheet> {
+  static const Map<String, _BradenSubscale> _subscales = {
+    'sensory': _BradenSubscale(
+      'Sensory Perception',
+      4,
+      definition:
+          'Ability to respond meaningfully to pressure-related discomfort.',
+    ),
+    'moisture': _BradenSubscale('Moisture', 4),
+    'activity': _BradenSubscale(
+      'Activity',
+      4,
+      definition:
+          'Degree of physical activity, from bedfast to frequent walking.',
+    ),
+    'mobility': _BradenSubscale(
+      'Mobility',
+      4,
+      definition: 'Ability to change and control body position independently.',
+    ),
+    'nutrition': _BradenSubscale('Nutrition', 4),
+    'friction': _BradenSubscale('Friction and Shear', 3),
+  };
+
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _directScoreController;
+  late _BradenInputMode _mode;
+  late Map<String, int?> _scores;
+  bool _showDetailedError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final initial = widget.initialResult;
+    _mode = initial != null && initial.subscaleScores == null
+        ? _BradenInputMode.direct
+        : _BradenInputMode.detailed;
+    _scores = {
+      for (final key in _subscales.keys) key: initial?.subscaleScores?[key],
+    };
+    _directScoreController = TextEditingController(
+      text: initial?.totalScore.toString() ?? '',
+    );
+  }
+
+  @override
+  void dispose() {
+    _directScoreController.dispose();
+    super.dispose();
+  }
+
+  int? get _detailedTotal {
+    if (_scores.values.any((score) => score == null)) return null;
+    return _scores.values.fold<int>(0, (total, score) => total + score!);
+  }
+
+  int? get _directTotal {
+    final score = int.tryParse(_directScoreController.text);
+    if (score == null || score < 6 || score > 23) return null;
+    return score;
+  }
+
+  int? get _currentTotal =>
+      _mode == _BradenInputMode.detailed ? _detailedTotal : _directTotal;
+
+  void _saveAssessment() {
+    if (_mode == _BradenInputMode.direct) {
+      if (!(_formKey.currentState?.validate() ?? false)) return;
+      final score = _directTotal;
+      if (score == null) return;
+      Navigator.of(context).pop(BradenScaleResult.fromScore(score));
+      return;
+    }
+
+    final score = _detailedTotal;
+    if (score == null) {
+      setState(() => _showDetailedError = true);
+      return;
+    }
+    Navigator.of(context).pop(
+      BradenScaleResult.fromScore(
+        score,
+        subscaleScores: {
+          for (final entry in _scores.entries) entry.key: entry.value!,
+        },
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+    return AnimatedPadding(
+      duration: const Duration(milliseconds: 180),
+      padding: EdgeInsets.only(bottom: bottomInset),
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * 0.9,
+        child: Material(
+          color: Theme.of(context).colorScheme.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          child: SafeArea(
+            top: false,
+            child: Column(
+              children: [
+                const SizedBox(height: 12),
+                Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 12, 12),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Braden Scale Assessment',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Close assessment',
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        SegmentedButton<_BradenInputMode>(
+                          segments: const [
+                            ButtonSegment(
+                              value: _BradenInputMode.detailed,
+                              label: Text('Detailed Assessment'),
+                              icon: Icon(Icons.fact_check_outlined),
+                            ),
+                            ButtonSegment(
+                              value: _BradenInputMode.direct,
+                              label: Text('Direct Score'),
+                              icon: Icon(Icons.pin_outlined),
+                            ),
+                          ],
+                          selected: {_mode},
+                          onSelectionChanged: (selection) {
+                            setState(() {
+                              if (selection.first == _BradenInputMode.direct &&
+                                  _directScoreController.text.isEmpty &&
+                                  _detailedTotal != null) {
+                                _directScoreController.text = _detailedTotal
+                                    .toString();
+                              }
+                              _mode = selection.first;
+                            });
+                          },
+                        ),
+                        const SizedBox(height: 16),
+                        if (_mode == _BradenInputMode.detailed)
+                          _buildDetailedAssessment()
+                        else
+                          _buildDirectAssessment(),
+                        const SizedBox(height: 16),
+                        _buildRiskSummary(),
+                      ],
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 56,
+                    child: FilledButton.icon(
+                      onPressed: _saveAssessment,
+                      icon: const Icon(Icons.check),
+                      label: const Text('Confirm Assessment'),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetailedAssessment() {
+    return Column(
+      children: [
+        for (final entry in _subscales.entries)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Card(
+              margin: EdgeInsets.zero,
+              child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      entry.value.label,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    if (entry.value.definition != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        entry.value.definition!,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    DropdownButtonFormField<int>(
+                      key: ValueKey('braden-${entry.key}'),
+                      initialValue: _scores[entry.key],
+                      decoration: const InputDecoration(
+                        labelText: 'Score',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: [
+                        for (
+                          var score = 1;
+                          score <= entry.value.maxScore;
+                          score++
+                        )
+                          DropdownMenuItem(value: score, child: Text('$score')),
+                      ],
+                      onChanged: (score) {
+                        setState(() {
+                          _scores[entry.key] = score;
+                          _showDetailedError = false;
+                        });
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        if (_showDetailedError)
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Complete all six subscales before saving.',
+              style: TextStyle(color: Colors.red),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildDirectAssessment() {
+    return Form(
+      key: _formKey,
+      child: TextFormField(
+        controller: _directScoreController,
+        keyboardType: TextInputType.number,
+        inputFormatters: [
+          FilteringTextInputFormatter.digitsOnly,
+          LengthLimitingTextInputFormatter(2),
+        ],
+        decoration: const InputDecoration(
+          labelText: 'Total score (6–23)',
+          helperText: 'Enter a whole number from 6 to 23.',
+          border: OutlineInputBorder(),
+          prefixIcon: Icon(Icons.numbers),
+        ),
+        validator: (value) {
+          final score = int.tryParse(value ?? '');
+          if (score == null || score < 6 || score > 23) {
+            return 'Enter a score between 6 and 23.';
+          }
+          return null;
+        },
+        onChanged: (_) => setState(() {}),
+      ),
+    );
+  }
+
+  Widget _buildRiskSummary() {
+    final score = _currentTotal;
+    if (score == null) {
+      return const Card(
+        child: Padding(
+          padding: EdgeInsets.all(16),
+          child: Text('Complete the assessment to calculate the total score.'),
+        ),
+      );
+    }
+    final color = BradenScaleResult.riskColorFor(score);
+    return Card(
+      color: color.withValues(alpha: 0.12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Total Score: $score',
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                BradenScaleResult.riskLevelFor(score),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class PatientListPage extends StatefulWidget {
   const PatientListPage({super.key, required this.repository});
 
@@ -417,8 +853,9 @@ class _PatientListPageState extends State<PatientListPage> {
     final nameController = TextEditingController();
     final idController = TextEditingController();
     final ageController = TextEditingController();
-    final scoreController = TextEditingController();
     String selectedGender = '男';
+    BradenScaleResult? bradenResult;
+    bool bradenRequiredError = false;
     showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -468,12 +905,101 @@ class _PatientListPageState extends State<PatientListPage> {
                     ),
                   ],
                 ),
-                TextField(
-                  controller: scoreController,
-                  decoration: const InputDecoration(
-                    labelText: 'Braden 評分 (6-23)',
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Pressure Injury Risk (Braden Scale)',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(height: 10),
+                        if (bradenResult == null)
+                          Text(
+                            'Not yet assessed',
+                            style: TextStyle(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                            ),
+                          )
+                        else
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              Text(
+                                'Total Score: ${bradenResult!.totalScore}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 6,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: BradenScaleResult.riskColorFor(
+                                    bradenResult!.totalScore,
+                                  ),
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: Text(
+                                  bradenResult!.riskLevel,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          height: 56,
+                          child: FilledButton.tonalIcon(
+                            onPressed: () async {
+                              final result =
+                                  await showModalBottomSheet<BradenScaleResult>(
+                                    context: context,
+                                    isScrollControlled: true,
+                                    useSafeArea: true,
+                                    builder: (_) => BradenScaleAssessmentSheet(
+                                      initialResult: bradenResult,
+                                    ),
+                                  );
+                              if (result != null) {
+                                setDialogState(() {
+                                  bradenResult = result;
+                                  bradenRequiredError = false;
+                                });
+                              }
+                            },
+                            icon: Icon(
+                              bradenResult == null ? Icons.add : Icons.edit,
+                            ),
+                            label: Text(
+                              bradenResult == null
+                                  ? 'Assess Braden Scale'
+                                  : 'Edit Assessment',
+                            ),
+                          ),
+                        ),
+                        if (bradenRequiredError) ...[
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Complete the Braden assessment before registering.',
+                            style: TextStyle(color: Colors.red),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
-                  keyboardType: TextInputType.number,
                 ),
               ],
             ),
@@ -485,15 +1011,21 @@ class _PatientListPageState extends State<PatientListPage> {
             ),
             ElevatedButton(
               onPressed: () async {
-                if (nameController.text.isEmpty || idController.text.isEmpty)
+                if (nameController.text.isEmpty || idController.text.isEmpty) {
                   return;
+                }
+                if (bradenResult == null) {
+                  setDialogState(() => bradenRequiredError = true);
+                  return;
+                }
                 final newPatient = Patient(
                   bedNumber: bedController.text,
                   name: nameController.text,
                   id: idController.text,
                   gender: selectedGender,
                   age: int.tryParse(ageController.text) ?? 0,
-                  bradenScore: double.tryParse(scoreController.text) ?? 23,
+                  bradenScore: bradenResult!.totalScore.toDouble(),
+                  bradenSubscaleScores: bradenResult!.subscaleScores,
                 );
                 await widget.repository.addPatient(newPatient);
                 if (context.mounted) Navigator.pop(context);
@@ -823,7 +1355,9 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
           e['resource']['resourceType'] == 'Media' &&
           e['resource']['content'] != null &&
           e['resource']['content']['title'] == title) {
-        return e['resource']['content']['data'] ?? '';
+        return e['resource']['content']['url'] ??
+            e['resource']['content']['data'] ??
+            '';
       }
     }
     return '';
@@ -1686,20 +2220,46 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                                                             ),
                                                         onPressed: () async {
                                                           Navigator.pop(ctx);
-                                                          await FirebaseFirestore
-                                                              .instance
-                                                              .collection(
-                                                                'patients',
-                                                              )
-                                                              .doc(
-                                                                widget
-                                                                    .patientDocId,
-                                                              )
-                                                              .collection(
-                                                                'observations',
-                                                              )
-                                                              .doc(doc.id)
-                                                              .delete();
+                                                          final messenger =
+                                                              ScaffoldMessenger.of(
+                                                                context,
+                                                              );
+                                                          try {
+                                                            await _deleteStoredMediaFromBundle(
+                                                              doc.data()
+                                                                  as Map<
+                                                                    String,
+                                                                    dynamic
+                                                                  >,
+                                                            );
+                                                            await FirebaseFirestore
+                                                                .instance
+                                                                .collection(
+                                                                  'patients',
+                                                                )
+                                                                .doc(
+                                                                  widget
+                                                                      .patientDocId,
+                                                                )
+                                                                .collection(
+                                                                  'observations',
+                                                                )
+                                                                .doc(doc.id)
+                                                                .delete();
+                                                          } catch (error) {
+                                                            if (mounted) {
+                                                              messenger.showSnackBar(
+                                                                SnackBar(
+                                                                  content: Text(
+                                                                    '刪除紀錄失敗: $error',
+                                                                  ),
+                                                                  backgroundColor:
+                                                                      Colors
+                                                                          .redAccent,
+                                                                ),
+                                                              );
+                                                            }
+                                                          }
                                                         },
                                                         child: const Text(
                                                           '刪除',
@@ -2774,56 +3334,100 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       for (var entry in _capturedWounds.entries) {
         String partName = entry.key;
         WoundPhotoRecord record = entry.value;
+        final uploadId = DateTime.now().microsecondsSinceEpoch.toString();
+        final storageDirectory =
+            'patients/${widget.patientDocId}/observations/$uploadId';
+        final rgbReference = FirebaseStorage.instance.ref().child(
+          '$storageDirectory/rgb.jpg',
+        );
+        final thermalReference = FirebaseStorage.instance.ref().child(
+          '$storageDirectory/thermal.jpg',
+        );
+        final uploadedReferences = <Reference>[];
 
-        final fhirObservation = FhirWoundObservation(
-          subject: widget.patient,
-          bodySite: partName,
-          bradenScore: widget.patient.bradenScore,
-          features: record.features,
-          woundTemp: record.woundTemp,
-          referenceTemp: record.referenceTemp,
-          captureTime: record.captureTime,
-        );
-        final rgbMedia = FhirMedia(
-          subject: widget.patient,
-          base64Data: base64Encode(record.rgbBytes),
-          title: 'RGB Optical Image',
-          bodySite: partName,
-          captureTime: record.captureTime,
-        );
-        final thermalMedia = FhirMedia(
-          subject: widget.patient,
-          base64Data: base64Encode(record.thermalBytes),
-          title: 'Thermal Infrared Image',
-          bodySite: partName,
-          captureTime: record.captureTime,
-        );
-        final tempObservation = FhirTemperatureObservation(
-          subject: widget.patient,
-          temperature: record.woundTemp,
-          bodySite: partName,
-          captureTime: record.captureTime,
-        );
-        Map<String, dynamic> bundleJson = {
-          "resourceType": "Bundle",
-          "type": "collection",
-          "timestamp": FieldValue.serverTimestamp(),
-          "effectiveDateTime": record.captureTime.toUtc().toIso8601String(),
-          "bodySite": {"text": partName},
-          "entry": [
-            {"resource": fhirObservation.toJson()},
-            {"resource": tempObservation.toJson()},
-            {"resource": rgbMedia.toJson()},
-            {"resource": thermalMedia.toJson()},
-          ],
-        };
+        try {
+          await rgbReference.putData(
+            record.rgbBytes,
+            SettableMetadata(
+              contentType: 'image/jpeg',
+              customMetadata: {'bodySite': partName, 'imageType': 'rgb'},
+            ),
+          );
+          uploadedReferences.add(rgbReference);
+          await thermalReference.putData(
+            record.thermalBytes,
+            SettableMetadata(
+              contentType: 'image/jpeg',
+              customMetadata: {'bodySite': partName, 'imageType': 'thermal'},
+            ),
+          );
+          uploadedReferences.add(thermalReference);
+          final imageUrls = await Future.wait([
+            rgbReference.getDownloadURL(),
+            thermalReference.getDownloadURL(),
+          ]);
 
-        await firestore
-            .collection('patients')
-            .doc(widget.patientDocId)
-            .collection('observations')
-            .add(bundleJson)
-            .timeout(const Duration(seconds: 10));
+          final fhirObservation = FhirWoundObservation(
+            subject: widget.patient,
+            bodySite: partName,
+            bradenScore: widget.patient.bradenScore,
+            features: record.features,
+            woundTemp: record.woundTemp,
+            referenceTemp: record.referenceTemp,
+            captureTime: record.captureTime,
+          );
+          final rgbMedia = FhirMedia(
+            subject: widget.patient,
+            url: imageUrls[0],
+            title: 'RGB Optical Image',
+            bodySite: partName,
+            captureTime: record.captureTime,
+          );
+          final thermalMedia = FhirMedia(
+            subject: widget.patient,
+            url: imageUrls[1],
+            title: 'Thermal Infrared Image',
+            bodySite: partName,
+            captureTime: record.captureTime,
+          );
+          final tempObservation = FhirTemperatureObservation(
+            subject: widget.patient,
+            temperature: record.woundTemp,
+            bodySite: partName,
+            captureTime: record.captureTime,
+          );
+          Map<String, dynamic> bundleJson = {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "timestamp": FieldValue.serverTimestamp(),
+            "effectiveDateTime": record.captureTime.toUtc().toIso8601String(),
+            "bodySite": {"text": partName},
+            "entry": [
+              {"resource": fhirObservation.toJson()},
+              {"resource": tempObservation.toJson()},
+              {"resource": rgbMedia.toJson()},
+              {"resource": thermalMedia.toJson()},
+            ],
+          };
+
+          await firestore
+              .collection('patients')
+              .doc(widget.patientDocId)
+              .collection('observations')
+              .add(bundleJson)
+              .timeout(const Duration(seconds: 10));
+        } catch (_) {
+          for (final reference in uploadedReferences) {
+            try {
+              await reference.delete();
+            } on FirebaseException catch (cleanupError) {
+              if (cleanupError.code != 'object-not-found') {
+                debugPrint('無法清理未完成上傳的影像: $cleanupError');
+              }
+            }
+          }
+          rethrow;
+        }
       }
       if (!mounted) return;
       Navigator.pop(context);
@@ -2837,8 +3441,14 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
     } catch (e) {
       if (!mounted) return;
       Navigator.pop(context);
+      final errorMessage = e is FirebaseException && e.code == 'quota-exceeded'
+          ? 'Firebase Storage 容量配額已滿。請清理舊檔或升級 Firebase 方案後重試。'
+          : '上傳失敗: $e';
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('上傳失敗: $e'), backgroundColor: Colors.redAccent),
+        SnackBar(
+          content: Text(errorMessage),
+          backgroundColor: Colors.redAccent,
+        ),
       );
     }
   }
