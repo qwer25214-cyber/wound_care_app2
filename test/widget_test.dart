@@ -5,6 +5,7 @@
 // gestures. You can also use WidgetTester to find child widgets in the widget
 // tree, read text, and verify that the values of widget properties are correct.
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -60,13 +61,15 @@ class _FakeThermalFrame implements ThermalFrame {
 }
 
 class _FakeWoundCameraService implements WoundCameraService {
-  _FakeWoundCameraService({this.events});
+  _FakeWoundCameraService({this.events, this.error});
 
   final List<String>? events;
+  final Object? error;
 
   @override
   Future<WoundCameraCapture?> capturePair() async {
     events?.add('capture');
+    if (error != null) throw error!;
     final imageBytes = base64Decode(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lS8AAAAASUVORK5CYII=',
     );
@@ -178,6 +181,76 @@ void main() {
     );
   });
 
+  testWidgets('stops showing progress when anonymous auth times out', (
+    WidgetTester tester,
+  ) async {
+    final pendingAuth = Completer<String>();
+    const patient = Patient(
+      bedNumber: '301-A',
+      name: '測試病患',
+      id: 'test-001',
+      gender: '女',
+      age: 70,
+      bradenScore: 15,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WoundCaptureWizardPage(
+          patient: patient,
+          partName: '足跟',
+          cameraService: _FakeWoundCameraService(),
+          resolveUserUid: () => pendingAuth.future,
+        ),
+      ),
+    );
+
+    await tester.ensureVisible(find.text('擷取 RGB + Thermal'));
+    await tester.tap(find.text('擷取 RGB + Thermal'));
+    await tester.pump();
+    expect(find.text('正在驗證匿名登入...'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 21));
+    await tester.pump();
+
+    expect(find.text('擷取 RGB + Thermal'), findsOneWidget);
+    expect(
+      find.text('匿名登入失敗，請確認 Firebase Console 已啟用 Anonymous Auth。'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('reports browser image-picker abort as a cancelled selection', (
+    WidgetTester tester,
+  ) async {
+    const patient = Patient(
+      bedNumber: '301-A',
+      name: '測試病患',
+      id: 'test-001',
+      gender: '女',
+      age: 70,
+      bradenScore: 15,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: WoundCaptureWizardPage(
+          patient: patient,
+          partName: '足跟',
+          cameraService: _FakeWoundCameraService(
+            error: Exception('AbortError: signal is aborted without reason'),
+          ),
+          resolveUserUid: () async => 'test-user-uid',
+        ),
+      ),
+    );
+
+    await tester.ensureVisible(find.text('擷取 RGB + Thermal'));
+    await tester.tap(find.text('擷取 RGB + Thermal'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('圖片選取已取消，請重新選取 RGB 與 Thermal 影像。'), findsOneWidget);
+    expect(find.text('擷取 RGB + Thermal'), findsOneWidget);
+  });
+
   test('scopes wound image storage paths by Firebase UID', () {
     expect(
       patientImageStorageDirectory(
@@ -231,6 +304,105 @@ void main() {
     final content = media.toJson()['content'] as Map<String, dynamic>;
     expect(content['data'], 'aW1hZ2U=');
     expect(content.containsKey('url'), isFalse);
+  });
+
+  testWidgets('renders legacy Base64 FHIR images from memory', (
+    WidgetTester tester,
+  ) async {
+    const imageData =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lS8AAAAASUVORK5CYII=';
+    final bundle = <String, dynamic>{
+      'resourceType': 'Bundle',
+      'bodySite': {'text': '足跟'},
+      'entry': [
+        for (final title in ['RGB Optical Image', 'Thermal Infrared Image'])
+          {
+            'resource': {
+              'resourceType': 'Media',
+              'content': {'title': title, 'data': imageData},
+            },
+          },
+      ],
+    };
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: DualModalOverlayCard(
+              docId: 'legacy-record',
+              data: bundle,
+              onDelete: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 60));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(Image), findsNWidgets(2));
+    expect(find.text('圖片資料無法解碼'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('loads Storage image URLs through the injected bytes loader', (
+    WidgetTester tester,
+  ) async {
+    const imageData =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lS8AAAAASUVORK5CYII=';
+    final imageBytes = base64Decode(imageData);
+    final loadedUrls = <String>[];
+    final bundle = <String, dynamic>{
+      'resourceType': 'Bundle',
+      'bodySite': {'text': '足跟'},
+      'entry': [
+        for (final entry in [
+          ('RGB Optical Image', 'https://storage.example.test/rgb.jpg'),
+          (
+            'Thermal Infrared Image',
+            'https://storage.example.test/thermal.jpg',
+          ),
+        ])
+          {
+            'resource': {
+              'resourceType': 'Media',
+              'content': {'title': entry.$1, 'url': entry.$2},
+            },
+          },
+      ],
+    };
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: DualModalOverlayCard(
+              docId: 'storage-record',
+              data: bundle,
+              onDelete: () {},
+              imageLoader: (url) async {
+                loadedUrls.add(url);
+                return imageBytes;
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 60));
+    await tester.pumpAndSettle();
+
+    expect(
+      loadedUrls,
+      containsAll([
+        'https://storage.example.test/rgb.jpg',
+        'https://storage.example.test/thermal.jpg',
+      ]),
+    );
+    expect(find.byType(Image), findsNWidgets(2));
+    expect(find.textContaining('Storage 錯誤'), findsNothing);
+    expect(tester.takeException(), isNull);
   });
 
   test('maps Braden scores to the requested risk bands', () {

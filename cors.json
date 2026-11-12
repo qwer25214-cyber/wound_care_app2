@@ -1,0 +1,14 @@
+[
+  {
+    "origin": [
+      "http://192.168.1.112:8080",
+      "http://localhost:8080",
+      "http://127.0.0.1:8080",
+      "https://wound-care-app2.web.app",
+      "https://wound-care-app2.firebaseapp.com"
+    ],
+    "method": ["GET", "HEAD"],
+    "responseHeader": ["Content-Type", "Content-Length", "ETag"],
+    "maxAgeSeconds": 3600
+  }
+]

@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:http/http.dart' show ClientException;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -30,10 +30,17 @@ Future<String> _signInAnonymouslyAndGetUid() async {
 Future<String> _ensureAnonymousUid() async {
   final initialAuth = _initialAnonymousAuth;
   if (initialAuth != null) {
-    final uid = await initialAuth;
-    if (FirebaseAuth.instance.currentUser?.uid == uid) return uid;
+    try {
+      final uid = await initialAuth.timeout(const Duration(seconds: 20));
+      if (FirebaseAuth.instance.currentUser?.uid == uid) return uid;
+    } catch (_) {
+      if (identical(_initialAnonymousAuth, initialAuth)) {
+        _initialAnonymousAuth = null;
+      }
+      rethrow;
+    }
   }
-  return _signInAnonymouslyAndGetUid();
+  return _signInAnonymouslyAndGetUid().timeout(const Duration(seconds: 20));
 }
 
 String patientImageStorageDirectory({
@@ -41,6 +48,10 @@ String patientImageStorageDirectory({
   required String patientDocId,
   required String uploadId,
 }) => 'patient_images/$uid/$patientDocId/$uploadId';
+
+bool _isAbortError(Object error) =>
+    error.toString().contains('AbortError') ||
+    (error is PlatformException && error.code == 'AbortError');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -73,6 +84,7 @@ class WoundCareApp extends StatelessWidget {
       theme: ThemeData(
         useMaterial3: true,
         brightness: Brightness.dark,
+        fontFamily: 'NotoSansTC',
         scaffoldBackgroundColor: const Color(0xFF121212),
         appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFF1E1E1E),
@@ -80,7 +92,9 @@ class WoundCareApp extends StatelessWidget {
           elevation: 0,
         ),
         cardColor: const Color(0xFF1E1E1E),
-        dialogBackgroundColor: const Color(0xFF1E1E1E),
+        dialogTheme: const DialogThemeData(
+          backgroundColor: Color(0xFF1E1E1E),
+        ),
         colorScheme: ColorScheme.fromSeed(
           seedColor: Colors.blueAccent,
           brightness: Brightness.dark,
@@ -145,25 +159,22 @@ class GalleryWoundCameraService implements WoundCameraService {
 
   @override
   Future<WoundCameraCapture?> capturePair() async {
-    final rgbPhoto = await _picker.pickImage(
-      source: ImageSource.gallery,
+    final photos = await _picker.pickMultiImage(
       imageQuality: 60,
       maxWidth: 600,
       maxHeight: 600,
+      limit: 2,
     );
-    if (rgbPhoto == null) return null;
-
-    final thermalPhoto = await _picker.pickImage(
-      source: ImageSource.gallery,
-      imageQuality: 60,
-      maxWidth: 600,
-      maxHeight: 600,
-    );
-    if (thermalPhoto == null) return null;
+    if (photos.isEmpty) return null;
+    if (photos.length != 2) {
+      throw const FormatException(
+        'Select exactly two images: RGB first, then Thermal.',
+      );
+    }
 
     return WoundCameraCapture(
-      rgbBytes: await rgbPhoto.readAsBytes(),
-      thermalFrame: MockThermalFrame(await thermalPhoto.readAsBytes()),
+      rgbBytes: await photos[0].readAsBytes(),
+      thermalFrame: MockThermalFrame(await photos[1].readAsBytes()),
       captureTime: DateTime.now(),
     );
   }
@@ -1147,15 +1158,17 @@ class _PatientListPageState extends State<PatientListPage> {
             child: StreamBuilder<List<PatientRecord>>(
               stream: _patientsStream,
               builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting)
+                if (snapshot.connectionState == ConnectionState.waiting) {
                   return const Center(child: CircularProgressIndicator());
-                if (!snapshot.hasData || snapshot.data!.isEmpty)
+                }
+                if (!snapshot.hasData || snapshot.data!.isEmpty) {
                   return const Center(
                     child: Text(
                       '目前無病患資料',
                       style: TextStyle(fontSize: 16, color: Colors.grey),
                     ),
                   );
+                }
                 var patientList = List<PatientRecord>.of(snapshot.data!);
                 patientList.sort(
                   (a, b) =>
@@ -1356,15 +1369,26 @@ class _PatientListPageState extends State<PatientListPage> {
 // =======================================================
 // === 歷史疊加紀錄卡 ===
 // =======================================================
+class _ImageLoadResult {
+  final Uint8List? bytes;
+  final String? error;
+
+  const _ImageLoadResult(this.bytes, this.error);
+}
+
+typedef StorageImageLoader = Future<Uint8List?> Function(String url);
+
 class DualModalOverlayCard extends StatefulWidget {
   final String docId;
   final Map<String, dynamic> data;
   final VoidCallback onDelete;
+  final StorageImageLoader? imageLoader;
   const DualModalOverlayCard({
     super.key,
     required this.docId,
     required this.data,
     required this.onDelete,
+    this.imageLoader,
   });
   @override
   State<DualModalOverlayCard> createState() => _DualModalOverlayCardState();
@@ -1372,8 +1396,10 @@ class DualModalOverlayCard extends StatefulWidget {
 
 class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
   double _thermalOpacity = 0.5;
-  String? _rgbUrl;
-  String? _thermalUrl;
+  Uint8List? _rgbBytes;
+  Uint8List? _thermalBytes;
+  String? _rgbLoadError;
+  String? _thermalLoadError;
   bool _isParsing = true;
 
   @override
@@ -1433,8 +1459,16 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
           'Thermal Image',
         );
       }
-      _rgbUrl = _convertToSafeDataUri(rgbBase64);
-      _thermalUrl = _convertToSafeDataUri(thermalBase64);
+      final imageResults = await Future.wait<_ImageLoadResult>([
+        _loadImageBytes(rgbBase64),
+        _loadImageBytes(thermalBase64),
+      ]);
+      final rgbResult = imageResults[0];
+      final thermalResult = imageResults[1];
+      _rgbBytes = rgbResult.bytes;
+      _rgbLoadError = rgbResult.error;
+      _thermalBytes = thermalResult.bytes;
+      _thermalLoadError = thermalResult.error;
     } catch (e) {
       debugPrint('圖片解析異常: $e');
     } finally {
@@ -1442,19 +1476,57 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
     }
   }
 
-  String? _convertToSafeDataUri(String? dataString) {
-    if (dataString == null || dataString.trim().isEmpty) return null;
-    String cleanString = dataString
-        .replaceAll('\n', '')
-        .replaceAll('\r', '')
-        .replaceAll(' ', '');
-    if (cleanString.startsWith('http://') || cleanString.startsWith('https://'))
-      return cleanString;
-    if (cleanString.startsWith('data:image')) return cleanString;
-    cleanString = cleanString.replaceAll('-', '+').replaceAll('_', '/');
-    int padding = cleanString.length % 4;
-    if (padding != 0) cleanString += '=' * (4 - padding);
-    return 'data:image/jpeg;base64,$cleanString';
+  Future<_ImageLoadResult> _loadImageBytes(String? source) async {
+    if (source == null || source.trim().isEmpty) {
+      return const _ImageLoadResult(null, null);
+    }
+
+    final value = source.trim();
+    try {
+      if (value.startsWith('https://') || value.startsWith('http://')) {
+        final imageLoader = widget.imageLoader;
+        if (imageLoader == null) await _ensureAnonymousUid();
+        final bytes =
+            await (imageLoader?.call(value) ??
+                FirebaseStorage.instance
+                    .refFromURL(value)
+                    .getData(10 * 1024 * 1024));
+        if (bytes == null || bytes.isEmpty) {
+          return const _ImageLoadResult(null, 'Storage 回傳空白圖片');
+        }
+        return _ImageLoadResult(bytes, null);
+      }
+
+      var base64Data = value;
+      if (base64Data.startsWith('data:image/')) {
+        final separator = base64Data.indexOf(',');
+        if (separator < 0) {
+          throw const FormatException('Image data URI is missing its payload.');
+        }
+        base64Data = base64Data.substring(separator + 1);
+      }
+      base64Data = base64Data
+          .replaceAll('\n', '')
+          .replaceAll('\r', '')
+          .replaceAll(' ', '')
+          .replaceAll('-', '+')
+          .replaceAll('_', '/');
+      final padding = base64Data.length % 4;
+      if (padding != 0) base64Data += '=' * (4 - padding);
+      return _ImageLoadResult(base64Decode(base64Data), null);
+    } catch (error) {
+      debugPrint('圖片載入失敗: $error');
+      if (error is FirebaseException) {
+        return _ImageLoadResult(null, 'Storage 錯誤: ${error.code}');
+      }
+      if (error is ClientException) {
+        return const _ImageLoadResult(
+          null,
+          '瀏覽器無法讀取 Storage，請確認 bucket CORS 網址設定及網路連線。',
+        );
+      }
+      return _ImageLoadResult(null, '圖片載入失敗 (${error.runtimeType})');
+    }
   }
 
   String _formatDateSafe(Map<String, dynamic> data) {
@@ -1485,16 +1557,19 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
         List<dynamic> comps = e['resource']['component'] ?? [];
         for (var c in comps) {
           if (isText) {
-            if (c['code']?['text'] == code)
+            if (c['code']?['text'] == code) {
               return c['valueCodeableConcept']?['text'] ??
                   c['valueQuantity']?['value']?.toString() ??
                   '';
+            }
           } else {
             if (c['code']?['coding']?[0]?['code'] == code) {
-              if (c['valueCodeableConcept'] != null)
+              if (c['valueCodeableConcept'] != null) {
                 return c['valueCodeableConcept']['text'] ?? '';
-              if (c['valueQuantity'] != null)
+              }
+              if (c['valueQuantity'] != null) {
                 return c['valueQuantity']['value']?.toString() ?? '';
+              }
             }
           }
         }
@@ -1523,44 +1598,68 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
       for (var c in comps) {
         if (c is Map && c['code'] != null) {
           bool match = false;
-          if (c['code']['text'] == txt) match = true;
+          if (c['code']['text'] == txt) {
+            match = true;
+          }
           if (loincDisplay != null &&
               c['code']['coding'] != null &&
-              c['code']['coding'][0]['display'] == loincDisplay)
+              c['code']['coding'][0]['display'] == loincDisplay) {
             match = true;
+          }
 
           if (match) {
-            if (c['valueCodeableConcept'] != null)
+            if (c['valueCodeableConcept'] != null) {
               return c['valueCodeableConcept']['text'];
-            if (c['valueString'] != null) return c['valueString'];
+            }
+            if (c['valueString'] != null) {
+              return c['valueString'];
+            }
             if (c['valueAttachment'] != null &&
-                c['valueAttachment']['data'] != null)
+                c['valueAttachment']['data'] != null) {
               return c['valueAttachment']['data'];
+            }
             if (c['valueQuantity'] != null &&
-                c['valueQuantity']['value'] != null)
+                c['valueQuantity']['value'] != null) {
               return c['valueQuantity']['value'].toString();
+            }
           }
         }
       }
-    } catch (e) {}
+    } catch (_) {
+      return '';
+    }
     return '';
   }
 
-  Widget _buildImageProvider(String? url) {
-    if (url != null && url.isNotEmpty) {
-      return Image.network(
-        url,
+  Widget _buildImageProvider(Uint8List? bytes, String? error) {
+    if (bytes != null && bytes.isNotEmpty) {
+      return Image.memory(
+        bytes,
         fit: BoxFit.cover,
         width: double.infinity,
         gaplessPlayback: true,
         filterQuality: FilterQuality.low,
-        errorBuilder: (c, e, s) => const Center(
-          child: Icon(Icons.error, color: Colors.redAccent, size: 36),
-        ),
+        errorBuilder: (context, error, stackTrace) =>
+            _buildImageError('圖片資料格式無效'),
       );
     }
-    return const Center(
-      child: Icon(Icons.broken_image, color: Colors.grey, size: 36),
+    return _buildImageError(error ?? '找不到圖片連結');
+  }
+
+  Widget _buildImageError(String message) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.broken_image, color: Colors.redAccent, size: 36),
+          const SizedBox(height: 6),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.white70, fontSize: 12),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1764,11 +1863,14 @@ class _DualModalOverlayCardState extends State<DualModalOverlayCard> {
                         child: Stack(
                           alignment: Alignment.center,
                           children: [
-                            _buildImageProvider(_rgbUrl),
+                            _buildImageProvider(_rgbBytes, _rgbLoadError),
                             Positioned.fill(
                               child: Opacity(
                                 opacity: _thermalOpacity,
-                                child: _buildImageProvider(_thermalUrl),
+                                child: _buildImageProvider(
+                                  _thermalBytes,
+                                  _thermalLoadError,
+                                ),
                               ),
                             ),
                           ],
@@ -1880,7 +1982,7 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
       }
 
       for (var doc in querySnapshot.docs) {
-        var data = doc.data() as Map<String, dynamic>;
+        var data = doc.data();
         if (_selectedSite != '全部') {
           String site = data['bodySite']?['text'] ?? '';
           if (site != _selectedSite) continue;
@@ -2014,15 +2116,18 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                   child: StreamBuilder<QuerySnapshot>(
                     stream: _historyStream,
                     builder: (context, snapshot) {
-                      if (snapshot.connectionState == ConnectionState.waiting)
+                      if (snapshot.connectionState ==
+                          ConnectionState.waiting) {
                         return const Center(child: CircularProgressIndicator());
-                      if (!snapshot.hasData || snapshot.data!.docs.isEmpty)
+                      }
+                      if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
                         return const Center(
                           child: Text(
                             '目前無歷史紀錄，請新增',
                             style: TextStyle(color: Colors.grey, fontSize: 16),
                           ),
                         );
+                      }
 
                       var docs = snapshot.data!.docs;
 
@@ -2033,7 +2138,7 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                       }
 
                       var filteredDocs = docs;
-                      if (_selectedSite != '全部')
+                      if (_selectedSite != '全部') {
                         filteredDocs = docs
                             .where(
                               (d) =>
@@ -2042,6 +2147,7 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                                   _selectedSite,
                             )
                             .toList();
+                              }
 
                       // 🌟 時間軸日期分組邏輯
                       Map<String, List<DocumentSnapshot>> groupedByDate = {};
@@ -2061,8 +2167,9 @@ class _PatientHistoryPageState extends State<PatientHistoryPage> {
                           dateStr =
                               '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
                         }
-                        if (!groupedByDate.containsKey(dateStr))
+                        if (!groupedByDate.containsKey(dateStr)) {
                           groupedByDate[dateStr] = [];
+                        }
                         groupedByDate[dateStr]!.add(d);
                       }
 
@@ -2412,6 +2519,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
   Uint8List? thermalBytes;
   ThermalFrame? _thermalFrame;
   bool _isCapturing = false;
+  String _captureStatus = '';
 
   Offset _woundPoint = const Offset(0.5, 0.5);
   Offset _refPoint = const Offset(0.2, 0.8);
@@ -2450,11 +2558,19 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
 
   Future<void> _capturePair() async {
     if (_isCapturing) return;
-    setState(() => _isCapturing = true);
+    setState(() {
+      _isCapturing = true;
+      _captureStatus = '正在驗證匿名登入...';
+    });
     try {
-      final uid = await (widget.resolveUserUid ?? _ensureAnonymousUid)();
-      if (uid.isEmpty)
+      final uid = await (widget.resolveUserUid ?? _ensureAnonymousUid)()
+          .timeout(const Duration(seconds: 20));
+      if (uid.isEmpty) {
         throw StateError('Anonymous sign-in returned an empty UID.');
+      }
+      if (mounted) {
+        setState(() => _captureStatus = '請一次選取 RGB 與 Thermal 兩張影像...');
+      }
       final capture = await _cameraService.capturePair();
       if (capture == null || !mounted) return;
       setState(() {
@@ -2468,15 +2584,26 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
     } catch (error) {
       debugPrint('影像擷取失敗: $error');
       if (mounted) {
-        final message = error is FirebaseAuthException || error is StateError
+        final message = _isAbortError(error)
+            ? '圖片選取已取消，請重新選取 RGB 與 Thermal 影像。'
+            : error is FormatException
+            ? '請一次選取兩張影像：先選 RGB，再選 Thermal。'
+            : error is FirebaseAuthException ||
+                  error is StateError ||
+                  error is TimeoutException
             ? '匿名登入失敗，請確認 Firebase Console 已啟用 Anonymous Auth。'
-            : '影像擷取失敗，請重試。';
+            : '影像擷取失敗：$error';
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text(message)));
       }
     } finally {
-      if (mounted) setState(() => _isCapturing = false);
+      if (mounted) {
+        setState(() {
+          _isCapturing = false;
+          _captureStatus = '';
+        });
+      }
     }
   }
 
@@ -2726,6 +2853,11 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
             ),
           ],
           const SizedBox(height: 20),
+          const Text(
+            '相簿示範：請在同一次選取中依序選 RGB 與 Thermal 兩張影像。',
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 8),
           SizedBox(
             width: double.infinity,
             height: 56,
@@ -2738,7 +2870,7 @@ class _WoundCaptureWizardPageState extends State<WoundCaptureWizardPage> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.camera_alt),
-              label: Text(_isCapturing ? '正在擷取...' : '擷取 RGB + Thermal'),
+              label: Text(_isCapturing ? _captureStatus : '擷取 RGB + Thermal'),
             ),
           ),
           const SizedBox(height: 12),
@@ -3242,13 +3374,14 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
         }
         dialogTitle = '匯出 FHIR JSON (全部歷史紀錄)';
       } catch (e) {
-        if (mounted)
+        if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text('歷史紀錄讀取失敗: $e'),
               backgroundColor: Colors.redAccent,
             ),
           );
+        }
         return;
       }
     } else {
@@ -3496,6 +3629,8 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       Navigator.pop(context);
       final errorMessage = e is FirebaseAuthException
           ? '匿名登入失敗，請確認 Firebase Console 已啟用 Anonymous Auth。'
+          : _isAbortError(e)
+          ? '瀏覽器已中止上傳，請保持頁面開啟後重試。'
           : e is FirebaseException && e.code == 'quota-exceeded'
           ? 'Firebase Storage 容量配額已滿。請清理舊檔或升級 Firebase 方案後重試。'
           : '上傳失敗: $e';
@@ -3557,6 +3692,7 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
     String name,
     Set<String> existing,
   ) {
+    final messenger = ScaffoldMessenger.of(context);
     bool isJustCaptured = _capturedWounds.containsKey(name);
     bool isHistoricallyRecorded = existing.contains(name);
     Color dotColor;
@@ -3578,7 +3714,7 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
       child: GestureDetector(
         onTap: () async {
           if (isJustCaptured) {
-            ScaffoldMessenger.of(context).showSnackBar(
+            messenger.showSnackBar(
               const SnackBar(
                 content: Text(
                   '✅ 已在本次暫存清單中，若需重拍請先上傳後再新增',
@@ -3596,20 +3732,19 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
                 ),
               ),
             );
-            if (result != null) {
+            if (result != null && mounted) {
               setState(() {
                 _capturedWounds[name] = result;
               });
-              if (mounted)
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text(
-                      '✅ 評估已暫存，請繼續標記或點擊上傳',
-                      style: TextStyle(fontSize: 14),
-                    ),
-                    backgroundColor: Colors.green,
+              messenger.showSnackBar(
+                const SnackBar(
+                  content: Text(
+                    '✅ 評估已暫存，請繼續標記或點擊上傳',
+                    style: TextStyle(fontSize: 14),
                   ),
-                );
+                  backgroundColor: Colors.green,
+                ),
+              );
             }
           }
         },
@@ -3648,8 +3783,9 @@ class _BodyPartSelectionPageState extends State<BodyPartSelectionPage> {
               for (var doc in snapshot.data!.docs) {
                 var data = doc.data() as Map<String, dynamic>;
                 if (data['bodySite'] != null &&
-                    data['bodySite']['text'] != null)
+                    data['bodySite']['text'] != null) {
                   existingWounds.add(data['bodySite']['text']);
+                }
               }
             }
 
